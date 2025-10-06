@@ -125,8 +125,10 @@ def ppo_update(policy, optimizer, data, cfg: PPOConfig, residual_gain: float):
             # imitation：只在 (pn_valid==1 & res_budget>eps) 上计算
             mb_teacher = teacher_res[mb]
             mb_valid = (pn_valid[mb] > 0.5) & (res_budget[mb] > cfg.imitation_eps)
+            # 用当前策略对观测重新前向，得到可回传梯度的残差预测
+            mb_act_pred = torch.tanh(policy.actor(mb_obs))
             # 预测的绝对残差（把动作从[-1,1]映射为：residual_gain * res_budget * action）
-            mb_res_pred = residual_gain * res_budget[mb].unsqueeze(-1) * mb_act
+            mb_res_pred = residual_gain * res_budget[mb].unsqueeze(-1) * mb_act_pred
             if mb_valid.any():
                 im_loss = F.mse_loss(mb_res_pred[mb_valid], mb_teacher[mb_valid])
             else:
