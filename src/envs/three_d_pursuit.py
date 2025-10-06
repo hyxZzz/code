@@ -61,6 +61,8 @@ class ThreeDPursuitEnv:
 
         # reward shaping
         self.approach_reward_scale = float(e.get("approach_reward_scale", 0.002))
+        self.closing_reward_scale = float(e.get("closing_reward_scale", 0.0))
+        self.time_penalty = float(e.get("time_penalty", 0.001))
         self.kill_reward = float(e.get("kill_reward", 0.25))
 
         # --- control defaults ---
@@ -287,6 +289,7 @@ class ThreeDPursuitEnv:
         done = False
         reward = 0.0
 
+        prev_assign = self.curr_assign.copy()
         prev_dists = self._assignment_distances()
 
         # update assignments periodically
@@ -296,6 +299,7 @@ class ThreeDPursuitEnv:
         pn_actions = np.zeros((self.nD, 3), dtype=np.float32)
         pn_valid = np.zeros((self.nD,), dtype=np.float32)
         res_budget = np.zeros((self.nD,), dtype=np.float32)
+        closing_rates = np.zeros((self.nD,), dtype=np.float32)
 
         # defender propagation
         for i, d in enumerate(self.D):
@@ -323,9 +327,28 @@ class ThreeDPursuitEnv:
             d.vel = clamp_norm(d.vel + a_cmd * self.dt, self.d_v_max)
             d.pos = d.pos + d.vel * self.dt
 
+            if p is not None:
+                rel = p.pos - d.pos
+                dist = np.linalg.norm(rel)
+                if dist > 1e-6:
+                    los = rel / dist
+                    rel_vel = d.vel - p.vel
+                    closing = -float(np.dot(los, rel_vel))
+                    if closing > 0.0:
+                        closing_rates[i] = closing
+
         new_dists = self._assignment_distances()
+        approach_delta = np.zeros_like(prev_dists)
         if self.approach_reward_scale > 0.0:
-            reward += float(np.sum(prev_dists - new_dists) * self.approach_reward_scale)
+            for i in range(self.nD):
+                if self.curr_assign[i] == prev_assign[i] and self.curr_assign[i] >= 0:
+                    j = self.curr_assign[i]
+                    if self.P[j].alive:
+                        approach_delta[i] = prev_dists[i] - new_dists[i]
+            reward += float(np.sum(approach_delta) * self.approach_reward_scale)
+
+        if self.closing_reward_scale > 0.0:
+            reward += float(np.sum(closing_rates) * self.dt * self.closing_reward_scale)
 
         # attacker propagation (toward the target)
         for p in self.P:
@@ -366,7 +389,7 @@ class ThreeDPursuitEnv:
             reward += 1.0
 
         # small time penalty
-        reward -= 0.001
+        reward -= self.time_penalty
 
         # constrain to world bounds
         for ent in [self.T] + self.P + self.D:
@@ -379,7 +402,8 @@ class ThreeDPursuitEnv:
             "res_budget": res_budget,     # (nD,)
             "assign": self.curr_assign.copy(),
             "alive_P": np.array([p.alive for p in self.P], dtype=np.int32),
-            "approach_delta": prev_dists - new_dists,
+            "approach_delta": approach_delta,
+            "closing_rate": closing_rates,
         }
 
         # evaluation helpers
