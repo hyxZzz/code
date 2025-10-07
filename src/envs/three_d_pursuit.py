@@ -70,6 +70,9 @@ class ThreeDPursuitEnv:
         self.closing_reward_scale = float(e.get("closing_reward_scale", 0.0))
         self.time_penalty = float(e.get("time_penalty", 0.001))
         self.kill_reward = float(e.get("kill_reward", 0.25))
+        self.failure_penalty = float(e.get("failure_penalty", 1.0))
+        self.success_bonus = float(e.get("success_bonus", 1.0))
+        self.defender_loss_penalty = float(e.get("defender_loss_penalty", 0.0))
 
         # --- control defaults ---
         self.base_type = str(c.get("base_type", "escort")).lower()
@@ -388,7 +391,7 @@ class ThreeDPursuitEnv:
                 continue
             if within_radius(p.pos, self.T.pos, self.t_attack_radius):
                 done = True
-                reward -= 1.0
+                reward -= self.failure_penalty
                 self.T.alive = False
                 break
 
@@ -412,12 +415,14 @@ class ThreeDPursuitEnv:
                         self.curr_assign[i] = -1
                         self.prev_assign[i] = -1
                         reward += self.kill_reward
+                        if self.defender_loss_penalty > 0.0:
+                            reward -= self.defender_loss_penalty
                         break
 
         # success if all attackers are destroyed
         if not any(p.alive for p in self.P):
             done = True
-            reward += 1.0
+            reward += self.success_bonus
 
         # small time penalty
         reward -= self.time_penalty

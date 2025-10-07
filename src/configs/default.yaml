@@ -9,10 +9,10 @@ env:
   max_steps: 600
 
   # 命中半径
-  t_attack_radius: 10.0
-  d_attack_radius: 18.0
-  t_threat_radius: 28.0      # 额外威胁半径，P 进入后将触发 D 的提前拦截
-  d_threat_radius: 27.0      # D 在威胁态下的扩展击杀半径
+  t_attack_radius: 8.0
+  d_attack_radius: 24.0
+  t_threat_radius: 60.0      # ↑ 威胁判定提前，留出机动缓冲区（仅放宽命中判定，仍会提前前出）
+  d_threat_radius: 45.0      # ↑ 威胁态下允许更远距离拦截
 
   # 目标初速度（T）
   t_velocity: [10.0, 0.0, 0.0]
@@ -38,10 +38,13 @@ env:
     spawn_attempts: 200
 
   # 奖励塑形（让 D 更积极接战）
-  approach_reward_scale: 0.01   # ↑ 从 0.002 提升
-  closing_reward_scale: 0.008   # 新增：按LOS闭合速度奖励
-  kill_reward: 1.0              # ↑ 从 0.25 提升
-  time_penalty: 0.0005          # ↓ 减小时间惩罚
+  approach_reward_scale: 0.004   # ↓ 让塑形不主导优化
+  closing_reward_scale: 0.003    # ↓ 稍弱的闭合奖励
+  kill_reward: 1.2               # ↑ 适度奖励击杀
+  time_penalty: 0.0008           # ↑ 失败拖延的惩罚
+  failure_penalty: 2.0           # 新增：目标被击中直接-2
+  success_bonus: 2.0             # ↑ 成功护航奖励
+  defender_loss_penalty: 0.2     # 新增：防守方损失惩罚
 
 control:
   # 基线控制策略（更偏向主动拦截）

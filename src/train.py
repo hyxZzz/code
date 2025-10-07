@@ -116,6 +116,7 @@ def main(args):
         ep_rewards = []
         done = False
         t = 0
+        last_info = {}
         while not done and t < horizon:
             low_obs = torch.from_numpy(obs["low"]).float().to(device)  # (nD, obs_dim)
             act, logp, val = policy.act(low_obs, deterministic=False)
@@ -124,6 +125,7 @@ def main(args):
             val_np = val.detach().cpu().numpy()       # (nD,)
 
             obs2, rew, done, info = env.step(act_np)
+            last_info = info
 
             buf.add(
                 obs=obs["low"], action=act_np, logp=logp_np, value=val_np,
@@ -138,7 +140,7 @@ def main(args):
         stats = ppo_update(policy, optimizer, data, ppo_cfg, residual_gain=residual_gain)
 
         # 训练段统计（只记录，不用于刷新 best）
-        train_sr = 1.0 if (done and ep_rewards and ep_rewards[-1] > 0) else 0.0
+        train_sr = float(last_info.get("success", False)) if last_info else 0.0
         logger.log_scalar("train/ep_return", float(np.sum(ep_rewards)), upd)
         logger.log_scalar("train/success", train_sr, upd)
         logger.log_scalar("loss/policy", stats["policy_loss"], upd)
