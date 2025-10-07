@@ -90,8 +90,14 @@ def ppo_update(policy, optimizer, data, cfg: PPOConfig, residual_gain: float):
     # 取每步 value 的均值（按 defender 维度）
     values_time = values.view(len(rewards), nD).mean(-1).cpu().numpy()
     adv, rets = compute_gae(rewards, values_time, dones, cfg.gamma, cfg.gae_lambda)
-    adv_tiled = torch.from_numpy(np.repeat(adv[:,None], nD, axis=1).reshape(-1)).float().to(device)
+    adv_tiled = torch.from_numpy(np.repeat(adv[:, None], nD, axis=1).reshape(-1)).float().to(device)
     rets_tiled = torch.from_numpy(np.repeat(rets[:,None], nD, axis=1).reshape(-1)).float().to(device)
+
+    # advantage 标准化可大幅缓解梯度爆炸 / 占优任务梯度不平衡
+    adv_mean = adv_tiled.mean()
+    adv_std = adv_tiled.std()
+    if torch.isfinite(adv_std) and adv_std > 0:
+        adv_tiled = (adv_tiled - adv_mean) / (adv_std + 1e-8)
 
     # imitation 目标（以“绝对残差指令”为目标，减小预算尺度带来的不适定）
     teacher_res = torch.from_numpy(data["teacher_res"]).to(device)          # (B,3)
