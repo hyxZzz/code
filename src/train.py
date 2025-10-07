@@ -88,9 +88,15 @@ def main(args):
         imitation_coef=cfg["train"].get("imitation_w_start", 1.0),
         imitation_eps=cfg["control"].get("imitation_min_budget", 0.1),
         max_grad_norm=cfg["train"].get("max_grad_norm", 0.5),
-        device=device
+        device=device,
+        target_kl=cfg["train"].get("target_kl", 0.15),
+        value_clip_eps=cfg["train"].get("value_clip_eps", 0.2),
+        adv_norm_eps=cfg["train"].get("adv_norm_eps", 1e-8),
     )
     optimizer = Adam(policy.parameters(), lr=ppo_cfg.lr)
+    base_lr = ppo_cfg.lr
+    lr_anneal = bool(cfg["train"].get("lr_anneal", True))
+    lr_min_factor = float(cfg["train"].get("lr_min_factor", 0.05))
 
     total_updates = cfg["train"].get("updates", 2000)
     horizon = cfg["train"].get("horizon", 256)
@@ -139,6 +145,15 @@ def main(args):
         data = buf.cat()
         stats = ppo_update(policy, optimizer, data, ppo_cfg, residual_gain=residual_gain)
 
+        if lr_anneal:
+            frac = 1.0 - (upd / total_updates)
+            frac = min(max(frac, lr_min_factor), 1.0)
+            current_lr = base_lr * frac
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = current_lr
+        else:
+            current_lr = optimizer.param_groups[0]["lr"]
+
         # 训练段统计（只记录，不用于刷新 best）
         train_sr = float(last_info.get("success", False)) if last_info else 0.0
         logger.log_scalar("train/ep_return", float(np.sum(ep_rewards)), upd)
@@ -146,7 +161,11 @@ def main(args):
         logger.log_scalar("loss/policy", stats["policy_loss"], upd)
         logger.log_scalar("loss/value", stats["value_loss"], upd)
         logger.log_scalar("loss/imitation", stats["im_loss"], upd)
+        logger.log_scalar("loss/entropy", stats["entropy"], upd)
         logger.log_scalar("debug/approx_kl", stats["approx_kl"], upd)
+        logger.log_scalar("debug/approx_kl_last", stats["approx_kl_last"], upd)
+        logger.log_scalar("debug/kl_stop", 1.0 if stats["kl_stop"] else 0.0, upd)
+        logger.log_scalar("train/lr", float(current_lr), upd)
 
         # 定期完整评测，并据此刷新 best
         EVAL_EVERY = 20
