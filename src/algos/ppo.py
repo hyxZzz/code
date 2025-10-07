@@ -20,6 +20,9 @@ class PPOConfig:
     imitation_eps: float = 0.1   # res_budget 下限
     max_grad_norm: float = 0.5
     device: str = "cpu"
+    target_kl: float = 0.15
+    value_clip_eps: float = 0.2
+    adv_norm_eps: float = 1e-8
 
 class RolloutBuffer:
     def __init__(self):
@@ -91,13 +94,13 @@ def ppo_update(policy, optimizer, data, cfg: PPOConfig, residual_gain: float):
     values_time = values.view(len(rewards), nD).mean(-1).cpu().numpy()
     adv, rets = compute_gae(rewards, values_time, dones, cfg.gamma, cfg.gae_lambda)
     adv_tiled = torch.from_numpy(np.repeat(adv[:, None], nD, axis=1).reshape(-1)).float().to(device)
-    rets_tiled = torch.from_numpy(np.repeat(rets[:,None], nD, axis=1).reshape(-1)).float().to(device)
+    rets_tiled = torch.from_numpy(np.repeat(rets[:, None], nD, axis=1).reshape(-1)).float().to(device)
 
     # advantage 标准化可大幅缓解梯度爆炸 / 占优任务梯度不平衡
     adv_mean = adv_tiled.mean()
     adv_std = adv_tiled.std()
-    if torch.isfinite(adv_std) and adv_std > 0:
-        adv_tiled = (adv_tiled - adv_mean) / (adv_std + 1e-8)
+    if torch.isfinite(adv_std) and adv_std > cfg.adv_norm_eps:
+        adv_tiled = (adv_tiled - adv_mean) / (adv_std + cfg.adv_norm_eps)
 
     # imitation 目标（以“绝对残差指令”为目标，减小预算尺度带来的不适定）
     teacher_res = torch.from_numpy(data["teacher_res"]).to(device)          # (B,3)
@@ -108,6 +111,13 @@ def ppo_update(policy, optimizer, data, cfg: PPOConfig, residual_gain: float):
     inds = np.arange(B)
     n_minib = max(1, B // max(1, cfg.batch_size))
 
+    policy_loss = torch.tensor(0.0, device=device)
+    value_loss = torch.tensor(0.0, device=device)
+    im_loss = torch.tensor(0.0, device=device)
+    entropy_term = torch.tensor(0.0, device=device)
+    kl_stop = False
+    last_kl = 0.0
+
     for epoch in range(cfg.epochs):
         np.random.shuffle(inds)
         for mb in np.array_split(inds, n_minib):
@@ -117,6 +127,7 @@ def ppo_update(policy, optimizer, data, cfg: PPOConfig, residual_gain: float):
             mb_old_logp = old_logps[mb]
             mb_adv = adv_tiled[mb]
             mb_ret = rets_tiled[mb]
+            mb_old_val = values[mb]
 
             new_logp, v_pred, ent = policy.evaluate_actions(mb_obs, mb_act)
             ratio = torch.exp(new_logp - mb_old_logp)
@@ -124,9 +135,13 @@ def ppo_update(policy, optimizer, data, cfg: PPOConfig, residual_gain: float):
             surr2 = torch.clamp(ratio, 1.0 - cfg.clip_eps, 1.0 + cfg.clip_eps) * mb_adv
             policy_loss = -torch.min(surr1, surr2).mean()
 
-            value_loss = 0.5 * F.mse_loss(v_pred, mb_ret)
+            value_pred_clipped = mb_old_val + (v_pred - mb_old_val).clamp(-cfg.value_clip_eps, cfg.value_clip_eps)
+            value_losses = (v_pred - mb_ret) ** 2
+            value_losses_clipped = (value_pred_clipped - mb_ret) ** 2
+            value_loss = 0.5 * torch.max(value_losses, value_losses_clipped).mean()
 
             entropy_loss = -ent.mean() * cfg.entropy_coef
+            entropy_term = ent.mean()
 
             # imitation：只在 (pn_valid==1 & res_budget>eps) 上计算
             mb_teacher = teacher_res[mb]
@@ -147,10 +162,21 @@ def ppo_update(policy, optimizer, data, cfg: PPOConfig, residual_gain: float):
             torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
             optimizer.step()
 
+            approx_kl_mb = torch.mean(mb_old_logp - new_logp).detach()
+            last_kl = float(approx_kl_mb.item())
+            if cfg.target_kl > 0 and last_kl > cfg.target_kl:
+                kl_stop = True
+                break
+        if kl_stop:
+            break
+
     # 返回最后一轮的统计
     with torch.no_grad():
         approx_kl = (old_logps - policy.evaluate_actions(obs, actions)[0]).mean().item()
     return dict(policy_loss=float(policy_loss.item()),
                 value_loss=float(value_loss.item()),
                 im_loss=float(im_loss.item()),
-                approx_kl=float(approx_kl))
+                entropy=float(entropy_term.item()),
+                approx_kl=float(approx_kl),
+                approx_kl_last=float(last_kl),
+                kl_stop=kl_stop)
