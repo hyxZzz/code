@@ -11,6 +11,8 @@ env:
   # 命中半径
   t_attack_radius: 10.0
   d_attack_radius: 18.0
+  t_threat_radius: 28.0      # 额外威胁半径，P 进入后将触发 D 的提前拦截
+  d_threat_radius: 27.0      # D 在威胁态下的扩展击杀半径
 
   # 目标初速度（T）
   t_velocity: [10.0, 0.0, 0.0]
