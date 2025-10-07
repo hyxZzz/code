@@ -40,6 +40,12 @@ class ThreeDPursuitEnv:
         # kill radii
         self.t_attack_radius = float(e.get("t_attack_radius", 10.0))
         self.d_attack_radius = float(e.get("d_attack_radius", 15.0))
+        self.t_threat_radius = float(
+            e.get("t_threat_radius", self.t_attack_radius + self.d_attack_radius)
+        )
+        self.d_threat_radius = float(
+            e.get("d_threat_radius", max(self.d_attack_radius, self.d_attack_radius * 1.5))
+        )
 
         # speed and acceleration limits
         self.p_a_max = float(e.get("p_accel_max", 1.8))
@@ -391,10 +397,16 @@ class ThreeDPursuitEnv:
             for p in self.P:
                 if not p.alive:
                     continue
+
+                # pre-emptive intercept when an attacker threatens the target
+                threat = within_radius(p.pos, self.T.pos, self.t_threat_radius)
                 for i, d in enumerate(self.D):
                     if not d.alive:
                         continue
-                    if within_radius(d.pos, p.pos, self.d_attack_radius):
+
+                    attack_radius = self.d_threat_radius if threat else self.d_attack_radius
+
+                    if within_radius(d.pos, p.pos, attack_radius):
                         p.alive = False
                         d.alive = False
                         self.curr_assign[i] = -1
