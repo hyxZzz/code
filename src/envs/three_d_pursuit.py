@@ -296,6 +296,58 @@ class ThreeDPursuitEnv:
         self.curr_assign = new_assign.copy()
         self.prev_assign = new_assign.copy()
 
+    # ----------------- attacker guidance helpers -----------------
+    def _intercept_time(self, rel_pos: np.ndarray, target_vel: np.ndarray, speed_cap: float) -> float:
+        """Estimate the time for an attacker travelling up to ``speed_cap`` to intercept."""
+        dist = float(np.linalg.norm(rel_pos))
+        if speed_cap < 1e-6:
+            return 0.0
+
+        a = float(np.dot(target_vel, target_vel) - speed_cap * speed_cap)
+        b = float(2.0 * np.dot(rel_pos, target_vel))
+        c = float(np.dot(rel_pos, rel_pos))
+
+        if abs(a) < 1e-6:
+            if abs(b) < 1e-6:
+                return dist / speed_cap
+            t = -c / b
+            return t if t > 0.0 else dist / speed_cap
+
+        discriminant = b * b - 4.0 * a * c
+        if discriminant < 0.0:
+            return dist / speed_cap
+
+        sqrt_disc = float(np.sqrt(discriminant))
+        t1 = (-b - sqrt_disc) / (2.0 * a)
+        t2 = (-b + sqrt_disc) / (2.0 * a)
+        candidates = [t for t in (t1, t2) if t > 0.0]
+        if not candidates:
+            return dist / speed_cap
+        return min(candidates)
+
+    def _desired_attacker_velocity(self, p: Entity) -> np.ndarray:
+        """Compute a lead pursuit velocity aiming at the predicted intercept point."""
+        rel_pos = self.T.pos - p.pos
+        if np.linalg.norm(rel_pos) < 1e-6:
+            return self.T.vel.copy()
+
+        speed_cap = self.p_v_max
+        t_go = self._intercept_time(rel_pos, self.T.vel, speed_cap)
+        t_go = max(self.dt, min(t_go, self.max_steps * self.dt))
+
+        intercept_point = self.T.pos + self.T.vel * t_go
+        aim_dir = unit(intercept_point - p.pos)
+
+        dist = float(np.linalg.norm(intercept_point - p.pos))
+        required_speed = dist / max(t_go, self.dt)
+        desired_speed = float(np.clip(required_speed, self.T_speed, speed_cap))
+
+        # soften the closing speed when very close to avoid overshoot
+        if dist < max(self.t_attack_radius * 2.0, 1.0):
+            desired_speed = min(desired_speed, max(self.T_speed, dist / max(self.dt, 1e-3)))
+
+        return aim_dir * desired_speed
+
     # ----------------- step -----------------
     def step(self, action_residual: np.ndarray) -> Tuple[Dict, float, bool, Dict]:
         """
@@ -377,8 +429,10 @@ class ThreeDPursuitEnv:
         for p in self.P:
             if not p.alive:
                 continue
-            to_T = unit(self.T.pos - p.pos)
-            p.vel = clamp_norm(p.vel + to_T * self.p_a_max * self.dt, self.p_v_max)
+            desired_vel = self._desired_attacker_velocity(p)
+            dv = desired_vel - p.vel
+            accel = clamp_norm(dv / max(self.dt, 1e-6), self.p_a_max)
+            p.vel = clamp_norm(p.vel + accel * self.dt, self.p_v_max)
             p.pos = p.pos + p.vel * self.dt
 
         if self.T.alive:
