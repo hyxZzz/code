@@ -98,6 +98,8 @@ class ThreeDPursuitEnv:
     def _get_obs_low(self):
         low = np.zeros((self.nD, 13), dtype=np.float32)
         for i, d in enumerate(self.D):
+            if not d.alive:
+                continue
             j = self.curr_assign[i]
             has = 1.0 if (j >= 0 and self.P[j].alive) else 0.0
             if has > 0.5:
@@ -119,6 +121,8 @@ class ThreeDPursuitEnv:
         costs = np.full((self.nD, self.nP), 1e6, dtype=np.float32)
         mask = np.zeros((self.nD, self.nP), dtype=np.float32)
         for i, d in enumerate(self.D):
+            if not d.alive:
+                continue
             for j, p in enumerate(self.P):
                 if not p.alive:
                     continue
@@ -214,6 +218,8 @@ class ThreeDPursuitEnv:
     def _assignment_distances(self) -> np.ndarray:
         dists = np.zeros(self.nD, dtype=np.float32)
         for i, d in enumerate(self.D):
+            if not d.alive:
+                continue
             j = self.curr_assign[i]
             if j >= 0 and self.P[j].alive:
                 dists[i] = float(np.linalg.norm(self.P[j].pos - d.pos))
@@ -275,6 +281,9 @@ class ThreeDPursuitEnv:
             lock_steps=self.assign_lock_steps,
             algo=self.matcher_algo
         )
+        for i, d in enumerate(self.D):
+            if not d.alive:
+                new_assign[i] = -1
         self.curr_assign = new_assign.copy()
         self.prev_assign = new_assign.copy()
 
@@ -303,6 +312,11 @@ class ThreeDPursuitEnv:
 
         # defender propagation
         for i, d in enumerate(self.D):
+            if not d.alive:
+                pn_actions[i] = np.zeros(3, dtype=np.float32)
+                pn_valid[i] = 0.0
+                res_budget[i] = 0.0
+                continue
             j = self.curr_assign[i]
             p = self.P[j] if (j >= 0 and self.P[j].alive) else None
 
@@ -377,9 +391,14 @@ class ThreeDPursuitEnv:
             for p in self.P:
                 if not p.alive:
                     continue
-                for d in self.D:
+                for i, d in enumerate(self.D):
+                    if not d.alive:
+                        continue
                     if within_radius(d.pos, p.pos, self.d_attack_radius):
                         p.alive = False
+                        d.alive = False
+                        self.curr_assign[i] = -1
+                        self.prev_assign[i] = -1
                         reward += self.kill_reward
                         break
 
@@ -402,6 +421,7 @@ class ThreeDPursuitEnv:
             "res_budget": res_budget,     # (nD,)
             "assign": self.curr_assign.copy(),
             "alive_P": np.array([p.alive for p in self.P], dtype=np.int32),
+            "alive_D": np.array([d.alive for d in self.D], dtype=np.int32),
             "approach_delta": approach_delta,
             "closing_rate": closing_rates,
         }
