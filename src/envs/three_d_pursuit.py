@@ -251,12 +251,37 @@ class ThreeDPursuitEnv:
         guard_target_vel = self.T.vel
 
         if p is not None:
-            lead_time = max(0.5, self.attack_lead_time)
+            # --- threat-aware lead pursuit ---
+            rel_dp = p.pos - d.pos
+            dist_dp = float(np.linalg.norm(rel_dp))
+            # 以防速度过小导致 lead time 爆炸
+            eff_speed_cap = max(self.d_v_max * 0.85, 1.0)
+            time_by_speed = dist_dp / eff_speed_cap if eff_speed_cap > 1e-6 else self.attack_lead_time
+
+            # 估计 P 到达 T 的剩余时间，用于调节拦截激进度
+            rel_tp = self.T.pos - p.pos
+            p_speed = float(np.linalg.norm(p.vel))
+            time_to_target = self._intercept_time(rel_tp, self.T.vel, max(p_speed, 1.0))
+            critical_window = max(4.0, self.front_hit_time * 0.2)
+            urgency = float(np.clip(1.0 - time_to_target / critical_window, 0.0, 1.0))
+
+            lead_time = max(0.8, self.attack_lead_time + urgency * 4.0)
+            lead_time = max(lead_time, time_by_speed)
+            lead_time = float(np.clip(lead_time, 0.8, 12.0))
+
             intercept = p.pos + p.vel * lead_time
-            target_pos = (1.0 - self.attack_bias) * guard_target_pos + self.attack_bias * intercept
-            target_vel = (1.0 - self.attack_bias) * guard_target_vel + self.attack_bias * p.vel
-            kp = self.attack_kp
-            kd = self.attack_kd
+
+            # 威胁越大，越提前把防守圈推到目标前方
+            forward_push = self.T_vel_unit * (self.d_guard_radius * 0.6 * urgency)
+            guard_focus = guard_target_pos + forward_push
+
+            attack_bias = float(np.clip(self.attack_bias + 0.2 * urgency, 0.0, 1.0))
+            target_pos = (1.0 - attack_bias) * guard_focus + attack_bias * intercept
+            target_vel = (1.0 - attack_bias) * guard_target_vel + attack_bias * p.vel
+
+            gain_boost = 1.0 + 0.5 * urgency
+            kp = self.attack_kp * gain_boost
+            kd = self.attack_kd * (1.0 + 0.3 * urgency)
         else:
             target_pos = guard_target_pos
             target_vel = guard_target_vel
