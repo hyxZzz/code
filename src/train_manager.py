@@ -141,6 +141,10 @@ def main(args):
     teacher_mix_decay = int(train_cfg_dict.get("teacher_mixing_decay", updates))
     teacher_mix_min = float(train_cfg_dict.get("teacher_mixing_min", 0.0))
 
+    entropy_start = float(train_cfg_dict.get("entropy_coef_start", ppo_cfg.entropy_coef))
+    entropy_end = float(train_cfg_dict.get("entropy_coef_end", entropy_start))
+    entropy_decay_updates = int(train_cfg_dict.get("entropy_decay_updates", updates))
+
     def teacher_mix_schedule(step: int) -> float:
         if teacher_mix_decay <= 0:
             return float(teacher_mix_end)
@@ -159,6 +163,13 @@ def main(args):
         ep_reward = 0.0
 
         mix_prob = float(max(teacher_mix_schedule(upd - 1), teacher_mix_min))
+
+        if entropy_decay_updates > 0:
+            frac = min(1.0, upd / float(max(1, entropy_decay_updates)))
+        else:
+            frac = 1.0
+        current_entropy = entropy_start + (entropy_end - entropy_start) * frac
+        ppo_cfg.entropy_coef = max(0.0, float(current_entropy))
 
         while not done and manager_steps < horizon:
             need_update = ((env.t + 1) % max(1, env.manager_period)) == 0
@@ -242,6 +253,7 @@ def main(args):
         logger.log_scalar("train/teacher_mix_prob", mix_prob, upd)
         ratio = teacher_used / max(1, manager_steps)
         logger.log_scalar("train/teacher_mix_ratio", float(ratio), upd)
+        logger.log_scalar("train/entropy_coef", float(ppo_cfg.entropy_coef), upd)
 
         if upd % int(train_cfg_dict.get("eval_every", 20)) == 0:
             sr = evaluate_manager(
