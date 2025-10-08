@@ -43,8 +43,9 @@ class ThreeDPursuitEnv:
         self.t_threat_radius = float(
             e.get("t_threat_radius", self.t_attack_radius + self.d_attack_radius)
         )
+        # defenders now rely on固定截击半径，不再因为威胁态而放宽
         self.d_threat_radius = float(
-            e.get("d_threat_radius", max(self.d_attack_radius, self.d_attack_radius * 1.5))
+            e.get("d_threat_radius", self.d_attack_radius)
         )
 
         # speed and acceleration limits
@@ -75,7 +76,7 @@ class ThreeDPursuitEnv:
         self.defender_loss_penalty = float(e.get("defender_loss_penalty", 0.0))
 
         # --- control defaults ---
-        self.base_type = str(c.get("base_type", "escort")).lower()
+        self.base_type = str(c.get("base_type", "attack")).lower()
         self.base_kp = float(c.get("base_kp", 0.15))
         self.base_kd = float(c.get("base_kd", 0.50))
         self.attack_kp = float(c.get("attack_kp", self.base_kp * 1.8))
@@ -235,6 +236,27 @@ class ThreeDPursuitEnv:
         return dists
 
     # ----------------- teacher / baseline -----------------
+    def _attack_intercept_accel(self, d: Entity, p: Entity, limit: float) -> np.ndarray:
+        """Compute an aggressive intercept acceleration using PN + predictive PD."""
+        rel = p.pos - d.pos
+        dist = np.linalg.norm(rel) + 1e-6
+        los = rel / dist
+        rel_vel = p.vel - d.vel
+        closing = -np.dot(los, rel_vel)
+
+        # Proportional navigation term encourages快速转向目标
+        pn_term = np.cross(rel_vel, los)
+        pn_term = np.cross(pn_term, los)
+        a_pn = self.pn_nav_gain * closing * pn_term
+
+        lead_time = max(0.5, self.attack_lead_time)
+        intercept = p.pos + p.vel * lead_time
+        desired_pos = intercept - d.pos
+        desired_vel = p.vel
+        a_pd = self.attack_kp * desired_pos + self.attack_kd * (desired_vel - d.vel)
+
+        return clamp_norm(a_pn + a_pd, limit)
+
     def _base_accel(self, idx: int, d: Entity, p: Optional[Entity]) -> np.ndarray:
         """Baseline acceleration without residual learning."""
         mode = self.base_type
@@ -246,11 +268,15 @@ class ThreeDPursuitEnv:
             a_pd = self.base_kp * r + self.base_kd * v
             return clamp_norm(a_pd, self.base_alpha * self.d_a_max)
 
+        if mode == "attack" and p is not None:
+            return self._attack_intercept_accel(d, p, self.base_alpha * self.d_a_max)
+
         guard = self.guard_offsets[idx] if idx < len(self.guard_offsets) else np.zeros(3, dtype=np.float32)
         guard_target_pos = self.T.pos + guard
         guard_target_vel = self.T.vel
 
         if p is not None:
+            # Escort/混合模式在保持护航的同时偏向指派攻击者
             lead_time = max(0.5, self.attack_lead_time)
             intercept = p.pos + p.vel * lead_time
             target_pos = (1.0 - self.attack_bias) * guard_target_pos + self.attack_bias * intercept
@@ -271,6 +297,8 @@ class ThreeDPursuitEnv:
     def _full_teacher(self, d: Entity, p: Optional[Entity]) -> np.ndarray:
         if p is None:
             return np.zeros(3, dtype=np.float32)
+        if self.base_type == "attack":
+            return self._attack_intercept_accel(d, p, self.d_a_max)
         r = p.pos - d.pos
         v = p.vel - d.vel
         a_full = self.base_kp * r + self.base_kd * v
@@ -401,15 +429,11 @@ class ThreeDPursuitEnv:
                 if not p.alive:
                     continue
 
-                # pre-emptive intercept when an attacker threatens the target
-                threat = within_radius(p.pos, self.T.pos, self.t_threat_radius)
                 for i, d in enumerate(self.D):
                     if not d.alive:
                         continue
 
-                    attack_radius = self.d_threat_radius if threat else self.d_attack_radius
-
-                    if within_radius(d.pos, p.pos, attack_radius):
+                    if within_radius(d.pos, p.pos, self.d_attack_radius):
                         p.alive = False
                         d.alive = False
                         self.curr_assign[i] = -1
