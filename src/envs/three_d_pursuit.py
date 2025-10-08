@@ -85,7 +85,7 @@ class ThreeDPursuitEnv:
         self.pn_nav_gain = float(c.get("pn_nav_gain", 3.0))
         self.base_alpha = float(c.get("base_alpha", 0.6))
         self.residual_gain = float(c.get("residual_gain", 1.0))
-        self.manager_period = int(c.get("manager_period", 2))
+        self.manager_period = max(1, int(c.get("manager_period", 2)))
         self.imitation_eps = float(c.get("imitation_min_budget", 0.1))
 
         # assignment stabilisation
@@ -93,6 +93,13 @@ class ThreeDPursuitEnv:
         self.switch_penalty = float(m.get("switch_penalty", 12.0))
         self.assign_lock_steps = int(m.get("assign_lock_steps", 8))
         self.matcher_algo = str(m.get("algo", "hungarian"))
+
+        # manager high-level policy configuration
+        mgr_cfg = cfg.get("manager", {})
+        self.manager_mode = str(mgr_cfg.get("mode", "rule")).lower()
+        self.manager_null_action = self.nP  # index for "no preference"
+        self.pending_manager_action: Optional[np.ndarray] = None
+        self.last_manager_action = np.full(self.nD, self.manager_null_action, dtype=np.int32)
 
         # state
         self.rng = np.random.default_rng(seed=0)
@@ -144,6 +151,59 @@ class ThreeDPursuitEnv:
 
     def _get_obs(self):
         return {"low": self._get_obs_low(), "high": self._get_obs_high()}
+
+    # ----------------- manager-level observation -----------------
+    def get_manager_observation(self) -> np.ndarray:
+        high = self._get_obs_high()
+        costs = high["costs"].astype(np.float32)
+        mask = high["mask"].astype(np.float32)
+
+        prev_onehot = np.zeros((self.nD, self.nP + 1), dtype=np.float32)
+        for i, a in enumerate(self.curr_assign):
+            idx = self.manager_null_action if a < 0 else int(a)
+            prev_onehot[i, idx] = 1.0
+
+        defender_alive = np.array([1.0 if d.alive else 0.0 for d in self.D], dtype=np.float32)
+        attacker_alive = np.array([1.0 if p.alive else 0.0 for p in self.P], dtype=np.float32)
+        attacker_threat = np.array(
+            [1.0 if (p.alive and within_radius(p.pos, self.T.pos, self.t_threat_radius)) else 0.0 for p in self.P],
+            dtype=np.float32,
+        )
+        time_feat = np.array([self.t / max(1, self.max_steps)], dtype=np.float32)
+
+        features = np.concatenate(
+            [
+                costs.reshape(-1),
+                mask.reshape(-1),
+                prev_onehot.reshape(-1),
+                defender_alive,
+                attacker_alive,
+                attacker_threat,
+                time_feat,
+            ]
+        ).astype(np.float32)
+        return features
+
+    def get_manager_action_mask(self) -> np.ndarray:
+        high = self._get_obs_high()
+        mask = np.concatenate([high["mask"], np.ones((self.nD, 1), dtype=np.float32)], axis=1)
+        for i, d in enumerate(self.D):
+            if not d.alive:
+                mask[i, :] = 0.0
+                mask[i, -1] = 1.0
+        for j, p in enumerate(self.P):
+            if not p.alive:
+                mask[:, j] = 0.0
+        return mask.astype(np.float32)
+
+    def set_manager_action(self, action: Optional[np.ndarray]):
+        if action is None:
+            self.pending_manager_action = None
+            return
+        arr = np.asarray(action, dtype=np.int32)
+        if arr.shape != (self.nD,):
+            raise ValueError(f"manager action must have shape ({self.nD},), got {arr.shape}")
+        self.pending_manager_action = arr.copy()
 
     # ----------------- reset -----------------
     def reset(self, seed: Optional[int] = None):
@@ -221,6 +281,8 @@ class ThreeDPursuitEnv:
         self.prev_assign = np.full(self.nD, -1, dtype=np.int32)
         self.curr_assign = np.full(self.nD, -1, dtype=np.int32)
         self.assign_lock = np.zeros(self.nD, dtype=np.int32)
+        self.pending_manager_action = None
+        self.last_manager_action = np.full(self.nD, self.manager_null_action, dtype=np.int32)
         self.set_assignments_rule()
         return self._get_obs()
 
@@ -295,6 +357,58 @@ class ThreeDPursuitEnv:
                 new_assign[i] = -1
         self.curr_assign = new_assign.copy()
         self.prev_assign = new_assign.copy()
+        self.last_manager_action = np.full(self.nD, self.manager_null_action, dtype=np.int32)
+
+    def _apply_learned_assignment(self, action: np.ndarray):
+        high = self._get_obs_high()
+        costs = high["costs"]
+        mask = high["mask"].copy()
+
+        new_assign = np.full(self.nD, -1, dtype=np.int32)
+        used = set()
+        action = action.astype(np.int32)
+        for i, choice in enumerate(action):
+            if not self.D[i].alive:
+                continue
+            if choice < 0 or choice >= self.nP:
+                continue
+            if mask[i, choice] < 0.5 or not self.P[choice].alive:
+                continue
+            if choice in used:
+                continue
+            new_assign[i] = choice
+            used.add(int(choice))
+
+        mask_adjusted = mask.copy()
+        for j in used:
+            mask_adjusted[:, j] = 0.0
+        for i, choice in enumerate(new_assign):
+            if choice >= 0:
+                mask_adjusted[i, choice] = 1.0
+
+        remain_idx = [i for i in range(self.nD) if new_assign[i] == -1 and self.D[i].alive]
+        if remain_idx:
+            sub_costs = costs[remain_idx]
+            sub_mask = mask_adjusted[remain_idx]
+            sub_prev = self.prev_assign[remain_idx]
+            fallback = assign_targets(
+                costs=sub_costs,
+                mask=sub_mask,
+                prev_assign=sub_prev,
+                switch_penalty=self.switch_penalty,
+                lock_steps=self.assign_lock_steps,
+                algo=self.matcher_algo,
+            )
+            for idx, val in zip(remain_idx, fallback):
+                new_assign[idx] = val
+
+        for i, d in enumerate(self.D):
+            if not d.alive:
+                new_assign[i] = -1
+
+        self.curr_assign = new_assign.copy()
+        self.prev_assign = new_assign.copy()
+        self.last_manager_action = action.copy()
 
     # ----------------- step -----------------
     def step(self, action_residual: np.ndarray) -> Tuple[Dict, float, bool, Dict]:
@@ -312,7 +426,15 @@ class ThreeDPursuitEnv:
 
         # update assignments periodically
         if self.t % max(1, self.manager_period) == 0:
-            self.set_assignments_rule()
+            if self.manager_mode == "learned":
+                action = self.pending_manager_action
+                self.pending_manager_action = None
+                if action is None:
+                    self.set_assignments_rule()
+                else:
+                    self._apply_learned_assignment(action)
+            else:
+                self.set_assignments_rule()
 
         pn_actions = np.zeros((self.nD, 3), dtype=np.float32)
         pn_valid = np.zeros((self.nD,), dtype=np.float32)
@@ -437,6 +559,8 @@ class ThreeDPursuitEnv:
             "pn_valid": pn_valid,         # (nD,)
             "res_budget": res_budget,     # (nD,)
             "assign": self.curr_assign.copy(),
+            "manager_action": self.last_manager_action.copy(),
+            "manager_mode": self.manager_mode,
             "alive_P": np.array([p.alive for p in self.P], dtype=np.int32),
             "alive_D": np.array([d.alive for d in self.D], dtype=np.int32),
             "approach_delta": approach_delta,
