@@ -36,6 +36,7 @@ class RolloutBuffer:
         self.teacher_res = []
         self.pn_valid = []
         self.res_budget = []
+        self.last_value = None
 
     def add(self, obs, action, logp, value, reward, done, teacher_res, pn_valid, res_budget):
         self.obs.append(obs.copy())
@@ -47,6 +48,9 @@ class RolloutBuffer:
         self.teacher_res.append(teacher_res.copy())
         self.pn_valid.append(pn_valid.copy())
         self.res_budget.append(res_budget.copy())
+
+    def set_last_value(self, value):
+        self.last_value = np.array(value, dtype=np.float32)
 
     def cat(self):
         data = {
@@ -60,13 +64,15 @@ class RolloutBuffer:
             "pn_valid": np.concatenate(self.pn_valid, axis=0).astype(np.float32), # (T*nD,)
             "res_budget": np.concatenate(self.res_budget, axis=0).astype(np.float32),   # (T*nD,)
         }
+        if self.last_value is not None:
+            data["last_value"] = self.last_value.astype(np.float32)
         return data
 
-def compute_gae(rewards, values, dones, gamma, lam):
+def compute_gae(rewards, values, dones, gamma, lam, last_value):
     T = len(rewards)
     adv = np.zeros(T, dtype=np.float32)
     lastgaelam = 0.0
-    next_value = 0.0
+    next_value = float(last_value)
     for t in reversed(range(T)):
         nonterminal = 1.0 - dones[t]
         delta = rewards[t] + gamma * next_value * nonterminal - values[t]
@@ -92,7 +98,8 @@ def ppo_update(policy, optimizer, data, cfg: PPOConfig, residual_gain: float):
 
     # 取每步 value 的均值（按 defender 维度）
     values_time = values.view(len(rewards), nD).mean(-1).cpu().numpy()
-    adv, rets = compute_gae(rewards, values_time, dones, cfg.gamma, cfg.gae_lambda)
+    last_value = float(data.get("last_value", np.zeros(nD, dtype=np.float32)).mean())
+    adv, rets = compute_gae(rewards, values_time, dones, cfg.gamma, cfg.gae_lambda, last_value)
     adv_tiled = torch.from_numpy(np.repeat(adv[:, None], nD, axis=1).reshape(-1)).float().to(device)
     rets_tiled = torch.from_numpy(np.repeat(rets[:, None], nD, axis=1).reshape(-1)).float().to(device)
 

@@ -142,6 +142,11 @@ def main(args):
             obs = obs2
             t += 1
 
+        # 用最后一个观测计算 bootstrap value（处理 horizon 截断）
+        with torch.no_grad():
+            last_value = policy.critic(torch.from_numpy(obs["low"]).float().to(device)).squeeze(-1).cpu().numpy()
+        buf.set_last_value(last_value)
+
         data = buf.cat()
         stats = ppo_update(policy, optimizer, data, ppo_cfg, residual_gain=residual_gain)
 
