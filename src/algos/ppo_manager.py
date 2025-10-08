@@ -36,6 +36,7 @@ class ManagerRolloutBuffer:
         self.masks: list[np.ndarray] = []
         self.rewards: list[float] = []
         self.dones: list[float] = []
+        self.last_value: float | None = None
 
     def add(self, obs: np.ndarray, action: np.ndarray, logp: float, value: float, mask: np.ndarray):
         self.obs.append(obs.astype(np.float32))
@@ -52,10 +53,13 @@ class ManagerRolloutBuffer:
         self.rewards[-1] += float(reward)
         self.dones[-1] = float(done)
 
+    def set_last_value(self, value: float):
+        self.last_value = float(value)
+
     def cat(self):
         if not self.obs:
             raise RuntimeError("rollout buffer is empty")
-        return {
+        data = {
             "obs": np.stack(self.obs, axis=0).astype(np.float32),
             "actions": np.stack(self.actions, axis=0).astype(np.int64),
             "logps": np.array(self.logps, dtype=np.float32),
@@ -64,6 +68,11 @@ class ManagerRolloutBuffer:
             "rewards": np.array(self.rewards, dtype=np.float32),
             "dones": np.array(self.dones, dtype=np.float32),
         }
+
+        if self.last_value is not None:
+            data["last_value"] = np.array(self.last_value, dtype=np.float32)
+
+        return data
 
 
 def manager_ppo_update(policy, optimizer, data, cfg: ManagerPPOConfig):
@@ -76,7 +85,10 @@ def manager_ppo_update(policy, optimizer, data, cfg: ManagerPPOConfig):
 
     rewards = data["rewards"]
     dones = data["dones"]
-    adv, returns = compute_gae(rewards, data["values"], dones, cfg.gamma, cfg.gae_lambda)
+    last_value = float(data.get("last_value", 0.0))
+    adv, returns = compute_gae(
+        rewards, data["values"], dones, cfg.gamma, cfg.gae_lambda, last_value
+    )
     adv_t = torch.from_numpy(adv).float().to(device)
     returns_t = torch.from_numpy(returns).float().to(device)
 

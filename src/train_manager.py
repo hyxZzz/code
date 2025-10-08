@@ -171,6 +171,20 @@ def main(args):
             buf.add_reward(reward, done)
             ep_reward += reward
 
+        if buf.obs:
+            if done:
+                buf.set_last_value(0.0)
+            else:
+                obs_np = env.get_manager_observation()
+                mask_np = env.get_manager_action_mask()
+                obs_t = torch.from_numpy(obs_np).float().to(device)
+                mask_t = torch.from_numpy(mask_np).float().to(device)
+                with torch.no_grad():
+                    _, _, last_value_t = policy.act(
+                        obs_t, action_mask=mask_t, deterministic=True
+                    )
+                buf.set_last_value(last_value_t.item())
+
         if not buf.obs:
             continue
 
