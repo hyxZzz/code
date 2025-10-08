@@ -269,11 +269,37 @@ class ThreeDPursuitEnv:
         return clamp_norm(a_cmd, self.base_alpha * self.d_a_max)
 
     def _full_teacher(self, d: Entity, p: Optional[Entity]) -> np.ndarray:
+        """Teacher acceleration with proportional navigation residuals.
+
+        The baseline PD controller provides range keeping, while a 3D
+        proportional-navigation (PN) term generates lateral acceleration when
+        the attacker is closing in. This makes the handcrafted policy more
+        competitive against fast lead-pursuit attackers and gives the residual
+        learner a higher-quality reference to imitate.
+        """
         if p is None:
             return np.zeros(3, dtype=np.float32)
+
         r = p.pos - d.pos
-        v = p.vel - d.vel
-        a_full = self.base_kp * r + self.base_kd * v
+        dist = float(np.linalg.norm(r))
+        if dist < 1e-6:
+            return np.zeros(3, dtype=np.float32)
+
+        v_rel = p.vel - d.vel
+        los = r / dist
+        closing = -float(np.dot(v_rel, los))
+
+        # PD baseline keeps the defender near the attacker.
+        a_pd = self.base_kp * r + self.base_kd * v_rel
+
+        # PN navigation term (only when the attacker is closing in).
+        if closing > 1e-3:
+            los_rate = (v_rel + closing * los) / max(dist, 1e-6)
+            a_pn = self.pn_nav_gain * closing * los_rate
+        else:
+            a_pn = np.zeros(3, dtype=np.float32)
+
+        a_full = a_pd + a_pn
         a_full = clamp_norm(a_full, self.d_a_max)
         return a_full
 
@@ -326,7 +352,7 @@ class ThreeDPursuitEnv:
         return min(candidates)
 
     def _desired_attacker_velocity(self, p: Entity) -> np.ndarray:
-        """Compute a lead pursuit velocity aiming at the predicted intercept point."""
+        """Compute a lead-pursuit velocity aiming at a predicted intercept point."""
         rel_pos = self.T.pos - p.pos
         if np.linalg.norm(rel_pos) < 1e-6:
             return self.T.vel.copy()
