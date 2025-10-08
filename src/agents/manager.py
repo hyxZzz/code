@@ -47,10 +47,11 @@ class ManagerPolicy(nn.Module):
 
     def _masked_logits(self, logits: torch.Tensor, action_mask: torch.Tensor | None) -> torch.Tensor:
         if action_mask is None:
-            return logits
+            return torch.nan_to_num(logits)
         mask = action_mask.to(logits.device)
         # Clamp to avoid log(0) during categorical sampling
-        return logits.masked_fill(mask <= 0, -1e9)
+        masked = logits.masked_fill(mask <= 0, -1e9)
+        return torch.nan_to_num(masked)
 
     def act(
         self,
