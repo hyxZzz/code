@@ -205,6 +205,31 @@ class ThreeDPursuitEnv:
             raise ValueError(f"manager action must have shape ({self.nD},), got {arr.shape}")
         self.pending_manager_action = arr.copy()
 
+    def compute_rule_manager_action(self) -> np.ndarray:
+        """Return the rule-based assignment as a manager action without mutating state."""
+
+        high = self._get_obs_high()
+        costs, mask = high["costs"], high["mask"]
+        # Use the same locking behaviour as the rule-based manager.
+        prev_assign = self.prev_assign.copy()
+        rule_assign = assign_targets(
+            costs=costs,
+            mask=mask,
+            prev_assign=prev_assign,
+            switch_penalty=self.switch_penalty,
+            lock_steps=self.assign_lock_steps,
+            algo=self.matcher_algo,
+        )
+
+        action = np.full(self.nD, self.manager_null_action, dtype=np.int32)
+        for i, d in enumerate(self.D):
+            if not d.alive:
+                continue
+            j = int(rule_assign[i])
+            if j >= 0 and j < self.nP and mask[i, j] > 0.5 and self.P[j].alive:
+                action[i] = j
+        return action
+
     # ----------------- reset -----------------
     def reset(self, seed: Optional[int] = None):
         if seed is not None:

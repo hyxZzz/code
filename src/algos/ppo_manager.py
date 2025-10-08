@@ -25,6 +25,7 @@ class ManagerPPOConfig:
     target_kl: float = 0.1
     adv_norm_eps: float = 1e-8
     device: str = "cpu"
+    teacher_coef: float = 0.1
 
 
 class ManagerRolloutBuffer:
@@ -34,16 +35,26 @@ class ManagerRolloutBuffer:
         self.logps: list[float] = []
         self.values: list[float] = []
         self.masks: list[np.ndarray] = []
+        self.teacher_actions: list[np.ndarray] = []
         self.rewards: list[float] = []
         self.dones: list[float] = []
         self.last_value: float | None = None
 
-    def add(self, obs: np.ndarray, action: np.ndarray, logp: float, value: float, mask: np.ndarray):
+    def add(
+        self,
+        obs: np.ndarray,
+        action: np.ndarray,
+        logp: float,
+        value: float,
+        mask: np.ndarray,
+        teacher_action: np.ndarray,
+    ):
         self.obs.append(obs.astype(np.float32))
         self.actions.append(action.astype(np.int32))
         self.logps.append(float(logp))
         self.values.append(float(value))
         self.masks.append(mask.astype(np.float32))
+        self.teacher_actions.append(teacher_action.astype(np.int32))
         self.rewards.append(0.0)
         self.dones.append(0.0)
 
@@ -65,6 +76,7 @@ class ManagerRolloutBuffer:
             "logps": np.array(self.logps, dtype=np.float32),
             "values": np.array(self.values, dtype=np.float32),
             "masks": np.stack(self.masks, axis=0).astype(np.float32),
+            "teacher_actions": np.stack(self.teacher_actions, axis=0).astype(np.int64),
             "rewards": np.array(self.rewards, dtype=np.float32),
             "dones": np.array(self.dones, dtype=np.float32),
         }
@@ -82,6 +94,7 @@ def manager_ppo_update(policy, optimizer, data, cfg: ManagerPPOConfig):
     old_logps = torch.from_numpy(data["logps"]).to(device)
     old_values = torch.from_numpy(data["values"]).to(device)
     action_masks = torch.from_numpy(data["masks"]).to(device)
+    teacher_actions = torch.from_numpy(data["teacher_actions"]).long().to(device)
 
     rewards = data["rewards"]
     dones = data["dones"]
@@ -105,6 +118,7 @@ def manager_ppo_update(policy, optimizer, data, cfg: ManagerPPOConfig):
     policy_loss = torch.tensor(0.0, device=device)
     value_loss = torch.tensor(0.0, device=device)
     entropy_term = torch.tensor(0.0, device=device)
+    imitation_loss = torch.tensor(0.0, device=device)
     last_kl = 0.0
     kl_stop = False
 
@@ -120,7 +134,9 @@ def manager_ppo_update(policy, optimizer, data, cfg: ManagerPPOConfig):
             mb_ret = returns_t[mb]
             mb_mask = action_masks[mb]
 
-            new_logp, v_pred, entropy = policy.evaluate_actions(mb_obs, mb_actions, action_mask=mb_mask)
+            new_logp, v_pred, entropy, logits = policy.evaluate_actions(
+                mb_obs, mb_actions, action_mask=mb_mask
+            )
             ratio = torch.exp(new_logp - mb_old_logp)
             surr1 = ratio * mb_adv
             surr2 = torch.clamp(ratio, 1.0 - cfg.clip_eps, 1.0 + cfg.clip_eps) * mb_adv
@@ -130,7 +146,24 @@ def manager_ppo_update(policy, optimizer, data, cfg: ManagerPPOConfig):
             entropy_loss = -entropy.mean() * cfg.entropy_coef
             entropy_term = entropy.mean()
 
-            loss = policy_loss + cfg.value_coef * value_loss + entropy_loss
+            mb_teacher = teacher_actions[mb]
+            logits_flat = logits.reshape(-1, policy.cfg.nP + 1)
+            targets_flat = mb_teacher.reshape(-1)
+            mask_flat = mb_mask.reshape(-1, policy.cfg.nP + 1)
+            valid = mask_flat.sum(dim=-1) > 0.5
+            if valid.any():
+                imitation_loss = F.cross_entropy(
+                    logits_flat[valid], targets_flat[valid], reduction="mean"
+                )
+            else:
+                imitation_loss = torch.tensor(0.0, device=device)
+
+            loss = (
+                policy_loss
+                + cfg.value_coef * value_loss
+                + entropy_loss
+                + cfg.teacher_coef * imitation_loss
+            )
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -146,7 +179,7 @@ def manager_ppo_update(policy, optimizer, data, cfg: ManagerPPOConfig):
             break
 
     with torch.no_grad():
-        new_logp_all, _, _ = policy.evaluate_actions(obs, actions, action_mask=action_masks)
+        new_logp_all, _, _, _ = policy.evaluate_actions(obs, actions, action_mask=action_masks)
         approx_kl = (old_logps - new_logp_all).mean().item()
 
     return dict(
@@ -156,4 +189,5 @@ def manager_ppo_update(policy, optimizer, data, cfg: ManagerPPOConfig):
         approx_kl=float(approx_kl),
         approx_kl_last=float(last_kl),
         kl_stop=bool(kl_stop),
+        imitation_loss=float(imitation_loss.item()),
     )

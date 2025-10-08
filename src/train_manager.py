@@ -130,6 +130,7 @@ def main(args):
         target_kl=float(train_cfg_dict.get("target_kl", 0.1)),
         adv_norm_eps=float(train_cfg_dict.get("adv_norm_eps", 1e-8)),
         device=str(device),
+        teacher_coef=float(train_cfg_dict.get("teacher_coef", 0.1)),
     )
     optimizer = Adam(policy.parameters(), lr=ppo_cfg.lr)
 
@@ -149,12 +150,20 @@ def main(args):
             if env.manager_mode == "learned" and need_update:
                 obs_np = env.get_manager_observation()
                 mask_np = env.get_manager_action_mask()
+                teacher_action = env.compute_rule_manager_action()
                 obs_t = torch.from_numpy(obs_np).float().to(device)
                 mask_t = torch.from_numpy(mask_np).float().to(device)
                 action_t, logp_t, value_t = policy.act(obs_t, action_mask=mask_t, deterministic=False)
                 action_np = action_t.squeeze(0).cpu().numpy()
                 env.set_manager_action(action_np)
-                buf.add(obs_np, action_np, logp_t.item(), value_t.item(), mask_np)
+                buf.add(
+                    obs_np,
+                    action_np,
+                    logp_t.item(),
+                    value_t.item(),
+                    mask_np,
+                    teacher_action,
+                )
                 manager_steps += 1
 
             if controller is not None:
@@ -195,6 +204,7 @@ def main(args):
         logger.log_scalar("loss/policy", stats["policy_loss"], upd)
         logger.log_scalar("loss/value", stats["value_loss"], upd)
         logger.log_scalar("loss/entropy", stats["entropy"], upd)
+        logger.log_scalar("loss/imitation", stats["imitation_loss"], upd)
         logger.log_scalar("debug/approx_kl", stats["approx_kl"], upd)
         logger.log_scalar("debug/approx_kl_last", stats["approx_kl_last"], upd)
         logger.log_scalar("debug/kl_stop", 1.0 if stats["kl_stop"] else 0.0, upd)
