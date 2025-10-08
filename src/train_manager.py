@@ -125,17 +125,28 @@ def main(args):
         epochs=int(train_cfg_dict.get("epochs", 4)),
         batch_size=int(train_cfg_dict.get("batch_size", 256)),
         value_coef=float(train_cfg_dict.get("value_coef", 0.5)),
-        entropy_coef=float(train_cfg_dict.get("entropy_coef", 0.01)),
+        entropy_coef=float(train_cfg_dict.get("entropy_coef", 0.005)),
         max_grad_norm=float(train_cfg_dict.get("max_grad_norm", 0.5)),
         target_kl=float(train_cfg_dict.get("target_kl", 0.1)),
         adv_norm_eps=float(train_cfg_dict.get("adv_norm_eps", 1e-8)),
         device=str(device),
-        teacher_coef=float(train_cfg_dict.get("teacher_coef", 0.1)),
+        teacher_coef=float(train_cfg_dict.get("teacher_coef", 0.4)),
     )
     optimizer = Adam(policy.parameters(), lr=ppo_cfg.lr)
 
     updates = int(train_cfg_dict.get("updates", 300))
     horizon = int(train_cfg_dict.get("horizon", 256))
+    teacher_mix_start = float(train_cfg_dict.get("teacher_mixing_start", 1.0))
+    teacher_mix_end = float(train_cfg_dict.get("teacher_mixing_end", 0.2))
+    teacher_mix_decay = int(train_cfg_dict.get("teacher_mixing_decay", updates))
+
+    def teacher_mix_schedule(step: int) -> float:
+        if teacher_mix_decay <= 0:
+            return float(teacher_mix_end)
+        frac = min(1.0, max(0.0, step / float(teacher_mix_decay)))
+        return float(teacher_mix_start + (teacher_mix_end - teacher_mix_start) * frac)
+
+    rng = np.random.default_rng(cfg.get("seed", 0) + 2025)
 
     best_sr = 0.0
     for upd in range(1, updates + 1):
@@ -143,7 +154,10 @@ def main(args):
         obs = env.reset(seed=cfg.get("seed", 0) + upd)
         done = False
         manager_steps = 0
+        teacher_used = 0
         ep_reward = 0.0
+
+        mix_prob = float(teacher_mix_schedule(upd - 1))
 
         while not done and manager_steps < horizon:
             need_update = ((env.t + 1) % max(1, env.manager_period)) == 0
@@ -153,16 +167,32 @@ def main(args):
                 teacher_action = env.compute_rule_manager_action()
                 obs_t = torch.from_numpy(obs_np).float().to(device)
                 mask_t = torch.from_numpy(mask_np).float().to(device)
-                action_t, logp_t, value_t = policy.act(obs_t, action_mask=mask_t, deterministic=False)
+                action_t, logp_t, value_t = policy.act(
+                    obs_t, action_mask=mask_t, deterministic=False
+                )
                 action_np = action_t.squeeze(0).cpu().numpy()
-                env.set_manager_action(action_np)
+
+                use_teacher = bool(rng.random() < mix_prob)
+                if use_teacher:
+                    teacher_tensor = torch.from_numpy(teacher_action).long().unsqueeze(0).to(device)
+                    exec_logp, _, _, _ = policy.evaluate_actions(
+                        obs_t.unsqueeze(0), teacher_tensor, action_mask=mask_t.unsqueeze(0)
+                    )
+                    logp_val = exec_logp.squeeze(0)
+                    action_exec = teacher_action.astype(np.int32)
+                    teacher_used += 1
+                else:
+                    logp_val = logp_t.squeeze(0)
+                    action_exec = action_np.astype(np.int32)
+
+                env.set_manager_action(action_exec)
                 buf.add(
                     obs_np,
-                    action_np,
-                    logp_t.item(),
+                    action_exec,
+                    float(logp_val.item()),
                     value_t.item(),
                     mask_np,
-                    teacher_action,
+                    teacher_action.astype(np.int32),
                 )
                 manager_steps += 1
 
@@ -208,6 +238,9 @@ def main(args):
         logger.log_scalar("debug/approx_kl", stats["approx_kl"], upd)
         logger.log_scalar("debug/approx_kl_last", stats["approx_kl_last"], upd)
         logger.log_scalar("debug/kl_stop", 1.0 if stats["kl_stop"] else 0.0, upd)
+        logger.log_scalar("train/teacher_mix_prob", mix_prob, upd)
+        ratio = teacher_used / max(1, manager_steps)
+        logger.log_scalar("train/teacher_mix_ratio", float(ratio), upd)
 
         if upd % int(train_cfg_dict.get("eval_every", 20)) == 0:
             sr = evaluate_manager(
