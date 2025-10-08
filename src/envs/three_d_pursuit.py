@@ -134,7 +134,10 @@ class ThreeDPursuitEnv:
 
     def _get_obs_high(self):
         # cost matrix and mask used by assignment, approximated via distance / relative speed
-        costs = np.full((self.nD, self.nP), 1e6, dtype=np.float32)
+        # Bound the costs by the maximum episode horizon so the manager network does not
+        # receive extremely large inputs that can destabilise optimisation.
+        max_cost = float(self.max_steps * self.dt)
+        costs = np.full((self.nD, self.nP), max_cost, dtype=np.float32)
         mask = np.zeros((self.nD, self.nP), dtype=np.float32)
         for i, d in enumerate(self.D):
             if not d.alive:
@@ -145,7 +148,8 @@ class ThreeDPursuitEnv:
                 diff = p.pos - d.pos
                 dist = np.linalg.norm(diff) + 1e-6
                 rel_speed = np.linalg.norm(p.vel - d.vel) + 1e-6
-                costs[i, j] = dist / rel_speed
+                cost = dist / rel_speed
+                costs[i, j] = np.clip(cost, 0.0, max_cost)
                 mask[i, j] = 1.0
         return {"costs": costs, "mask": mask}
 
@@ -171,6 +175,7 @@ class ThreeDPursuitEnv:
         )
         time_feat = np.array([self.t / max(1, self.max_steps)], dtype=np.float32)
 
+        max_cost = float(self.max_steps * self.dt)
         features = np.concatenate(
             [
                 costs.reshape(-1),
@@ -182,7 +187,9 @@ class ThreeDPursuitEnv:
                 time_feat,
             ]
         ).astype(np.float32)
-        return features
+        # Ensure the manager observation never carries NaNs/Infs which would otherwise
+        # corrupt the policy network parameters and lead to invalid logits.
+        return np.nan_to_num(features, nan=0.0, posinf=max_cost, neginf=-max_cost)
 
     def get_manager_action_mask(self) -> np.ndarray:
         high = self._get_obs_high()
