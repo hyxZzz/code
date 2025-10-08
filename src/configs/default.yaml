@@ -76,6 +76,29 @@ matcher:
   assign_lock_steps: 8         # 软锁定窗口
   switch_penalty: 12.0         # 切换成本，抑制频繁抖动
 
+manager:
+  mode: rule                   # rule | learned
+  hidden: 256                  # 高层网络隐层宽度
+
+manager_train:
+  updates: 300
+  horizon: 256
+  gamma: 0.99
+  gae_lambda: 0.95
+  lr: 0.0003
+  clip_eps: 0.2
+  epochs: 4
+  batch_size: 256
+  value_coef: 0.5
+  entropy_coef: 0.01
+  max_grad_norm: 0.5
+  target_kl: 0.1
+  eval_every: 20
+  eval_episodes: 40
+  final_eval_episodes: 80
+  controller_ckpt: ckpts/best.pt   # 先训练 controller，再加载权重训练 manager
+  controller_deterministic: true   # manager 训练时使用确定性残差动作
+
 train:
   updates: 400
   horizon: 600
