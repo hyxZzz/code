@@ -91,6 +91,7 @@ manager_train:
   batch_size: 256
   value_coef: 0.5
   entropy_coef: 0.01
+  teacher_coef: 0.1            # imitation weight toward rule-based assignments
   max_grad_norm: 0.5
   target_kl: 0.1
   eval_every: 20

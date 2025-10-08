@@ -82,7 +82,7 @@ class ManagerPolicy(nn.Module):
         obs: torch.Tensor,
         actions: torch.Tensor,
         action_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if obs.dim() == 1:
             obs = obs.unsqueeze(0)
         if actions.dim() == 1:
@@ -96,4 +96,4 @@ class ManagerPolicy(nn.Module):
         logp = dist.log_prob(actions).sum(dim=-1)
         entropy = dist.entropy().sum(dim=-1)
         value = self.critic(features).squeeze(-1)
-        return logp, value, entropy
+        return logp, value, entropy, logits
