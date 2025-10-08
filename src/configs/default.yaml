@@ -80,6 +80,13 @@ manager:
   mode: rule                   # rule | learned
   hidden: 256                  # 高层网络隐层宽度
 
+manager_reward:
+  cost_bonus_scale: 0.04       # 对比规则分配的平均截获时间改进
+  coverage_bonus_scale: 0.2    # 鼓励额外覆盖攻击者
+  threat_bonus_scale: 0.3      # 优先盯防威胁目标
+  switch_penalty_scale: 0.05   # 避免频繁换防
+  idle_penalty: 0.03           # 减少防守空转
+
 manager_train:
   updates: 300
   horizon: 256
@@ -95,6 +102,7 @@ manager_train:
   teacher_mixing_start: 1.0    # probability of executing rule assignment at update 0
   teacher_mixing_end: 0.2      # anneal toward partial teacher forcing
   teacher_mixing_decay: 200    # updates over which to anneal mixing probability
+  teacher_mixing_min: 0.35     # 不低于该概率，防止过早完全放弃示范
   max_grad_norm: 0.5
   target_kl: 0.1
   eval_every: 20

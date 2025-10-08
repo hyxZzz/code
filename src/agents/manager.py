@@ -29,8 +29,10 @@ class ManagerPolicy(nn.Module):
 
         self.encoder = nn.Sequential(
             nn.Linear(self.obs_dim, cfg.hidden),
+            nn.LayerNorm(cfg.hidden),
             nn.ReLU(),
             nn.Linear(cfg.hidden, cfg.hidden),
+            nn.LayerNorm(cfg.hidden),
             nn.ReLU(),
         )
         self.actor = nn.Linear(cfg.hidden, cfg.nD * action_dim)

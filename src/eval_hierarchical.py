@@ -126,7 +126,13 @@ def main() -> None:
     manager_ckpt = Path(args.manager_ckpt)
     if not manager_ckpt.exists():
         raise FileNotFoundError(f"Manager checkpoint not found: {manager_ckpt}")
-    manager.load_state_dict(torch.load(manager_ckpt, map_location=device))
+    m_state = torch.load(manager_ckpt, map_location=device)
+    missing, unexpected = manager.load_state_dict(m_state, strict=False)
+    if missing or unexpected:
+        print(
+            "[eval] Warning: manager checkpoint loaded with partial match. "
+            f"Missing: {missing} | Unexpected: {unexpected}"
+        )
     manager.eval()
 
     def make_eval_env() -> ThreeDPursuitEnv:

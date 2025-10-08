@@ -139,6 +139,7 @@ def main(args):
     teacher_mix_start = float(train_cfg_dict.get("teacher_mixing_start", 1.0))
     teacher_mix_end = float(train_cfg_dict.get("teacher_mixing_end", 0.2))
     teacher_mix_decay = int(train_cfg_dict.get("teacher_mixing_decay", updates))
+    teacher_mix_min = float(train_cfg_dict.get("teacher_mixing_min", 0.0))
 
     def teacher_mix_schedule(step: int) -> float:
         if teacher_mix_decay <= 0:
@@ -157,7 +158,7 @@ def main(args):
         teacher_used = 0
         ep_reward = 0.0
 
-        mix_prob = float(teacher_mix_schedule(upd - 1))
+        mix_prob = float(max(teacher_mix_schedule(upd - 1), teacher_mix_min))
 
         while not done and manager_steps < horizon:
             need_update = ((env.t + 1) % max(1, env.manager_period)) == 0
