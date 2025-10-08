@@ -251,37 +251,12 @@ class ThreeDPursuitEnv:
         guard_target_vel = self.T.vel
 
         if p is not None:
-            # --- threat-aware lead pursuit ---
-            rel_dp = p.pos - d.pos
-            dist_dp = float(np.linalg.norm(rel_dp))
-            # 以防速度过小导致 lead time 爆炸
-            eff_speed_cap = max(self.d_v_max * 0.85, 1.0)
-            time_by_speed = dist_dp / eff_speed_cap if eff_speed_cap > 1e-6 else self.attack_lead_time
-
-            # 估计 P 到达 T 的剩余时间，用于调节拦截激进度
-            rel_tp = self.T.pos - p.pos
-            p_speed = float(np.linalg.norm(p.vel))
-            time_to_target = self._intercept_time(rel_tp, self.T.vel, max(p_speed, 1.0))
-            critical_window = max(4.0, self.front_hit_time * 0.2)
-            urgency = float(np.clip(1.0 - time_to_target / critical_window, 0.0, 1.0))
-
-            lead_time = max(0.8, self.attack_lead_time + urgency * 4.0)
-            lead_time = max(lead_time, time_by_speed)
-            lead_time = float(np.clip(lead_time, 0.8, 12.0))
-
+            lead_time = max(0.5, self.attack_lead_time)
             intercept = p.pos + p.vel * lead_time
-
-            # 威胁越大，越提前把防守圈推到目标前方
-            forward_push = self.T_vel_unit * (self.d_guard_radius * 0.6 * urgency)
-            guard_focus = guard_target_pos + forward_push
-
-            attack_bias = float(np.clip(self.attack_bias + 0.2 * urgency, 0.0, 1.0))
-            target_pos = (1.0 - attack_bias) * guard_focus + attack_bias * intercept
-            target_vel = (1.0 - attack_bias) * guard_target_vel + attack_bias * p.vel
-
-            gain_boost = 1.0 + 0.5 * urgency
-            kp = self.attack_kp * gain_boost
-            kd = self.attack_kd * (1.0 + 0.3 * urgency)
+            target_pos = (1.0 - self.attack_bias) * guard_target_pos + self.attack_bias * intercept
+            target_vel = (1.0 - self.attack_bias) * guard_target_vel + self.attack_bias * p.vel
+            kp = self.attack_kp
+            kd = self.attack_kd
         else:
             target_pos = guard_target_pos
             target_vel = guard_target_vel
@@ -294,37 +269,11 @@ class ThreeDPursuitEnv:
         return clamp_norm(a_cmd, self.base_alpha * self.d_a_max)
 
     def _full_teacher(self, d: Entity, p: Optional[Entity]) -> np.ndarray:
-        """Teacher acceleration with proportional navigation residuals.
-
-        The baseline PD controller provides range keeping, while a 3D
-        proportional-navigation (PN) term generates lateral acceleration when
-        the attacker is closing in. This makes the handcrafted policy more
-        competitive against fast lead-pursuit attackers and gives the residual
-        learner a higher-quality reference to imitate.
-        """
         if p is None:
             return np.zeros(3, dtype=np.float32)
-
         r = p.pos - d.pos
-        dist = float(np.linalg.norm(r))
-        if dist < 1e-6:
-            return np.zeros(3, dtype=np.float32)
-
-        v_rel = p.vel - d.vel
-        los = r / dist
-        closing = -float(np.dot(v_rel, los))
-
-        # PD baseline keeps the defender near the attacker.
-        a_pd = self.base_kp * r + self.base_kd * v_rel
-
-        # PN navigation term (only when the attacker is closing in).
-        if closing > 1e-3:
-            los_rate = (v_rel + closing * los) / max(dist, 1e-6)
-            a_pn = self.pn_nav_gain * closing * los_rate
-        else:
-            a_pn = np.zeros(3, dtype=np.float32)
-
-        a_full = a_pd + a_pn
+        v = p.vel - d.vel
+        a_full = self.base_kp * r + self.base_kd * v
         a_full = clamp_norm(a_full, self.d_a_max)
         return a_full
 
@@ -346,58 +295,6 @@ class ThreeDPursuitEnv:
                 new_assign[i] = -1
         self.curr_assign = new_assign.copy()
         self.prev_assign = new_assign.copy()
-
-    # ----------------- attacker guidance helpers -----------------
-    def _intercept_time(self, rel_pos: np.ndarray, target_vel: np.ndarray, speed_cap: float) -> float:
-        """Estimate the time for an attacker travelling up to ``speed_cap`` to intercept."""
-        dist = float(np.linalg.norm(rel_pos))
-        if speed_cap < 1e-6:
-            return 0.0
-
-        a = float(np.dot(target_vel, target_vel) - speed_cap * speed_cap)
-        b = float(2.0 * np.dot(rel_pos, target_vel))
-        c = float(np.dot(rel_pos, rel_pos))
-
-        if abs(a) < 1e-6:
-            if abs(b) < 1e-6:
-                return dist / speed_cap
-            t = -c / b
-            return t if t > 0.0 else dist / speed_cap
-
-        discriminant = b * b - 4.0 * a * c
-        if discriminant < 0.0:
-            return dist / speed_cap
-
-        sqrt_disc = float(np.sqrt(discriminant))
-        t1 = (-b - sqrt_disc) / (2.0 * a)
-        t2 = (-b + sqrt_disc) / (2.0 * a)
-        candidates = [t for t in (t1, t2) if t > 0.0]
-        if not candidates:
-            return dist / speed_cap
-        return min(candidates)
-
-    def _desired_attacker_velocity(self, p: Entity) -> np.ndarray:
-        """Compute a lead-pursuit velocity aiming at a predicted intercept point."""
-        rel_pos = self.T.pos - p.pos
-        if np.linalg.norm(rel_pos) < 1e-6:
-            return self.T.vel.copy()
-
-        speed_cap = self.p_v_max
-        t_go = self._intercept_time(rel_pos, self.T.vel, speed_cap)
-        t_go = max(self.dt, min(t_go, self.max_steps * self.dt))
-
-        intercept_point = self.T.pos + self.T.vel * t_go
-        aim_dir = unit(intercept_point - p.pos)
-
-        dist = float(np.linalg.norm(intercept_point - p.pos))
-        required_speed = dist / max(t_go, self.dt)
-        desired_speed = float(np.clip(required_speed, self.T_speed, speed_cap))
-
-        # soften the closing speed when very close to avoid overshoot
-        if dist < max(self.t_attack_radius * 2.0, 1.0):
-            desired_speed = min(desired_speed, max(self.T_speed, dist / max(self.dt, 1e-3)))
-
-        return aim_dir * desired_speed
 
     # ----------------- step -----------------
     def step(self, action_residual: np.ndarray) -> Tuple[Dict, float, bool, Dict]:
@@ -480,10 +377,8 @@ class ThreeDPursuitEnv:
         for p in self.P:
             if not p.alive:
                 continue
-            desired_vel = self._desired_attacker_velocity(p)
-            dv = desired_vel - p.vel
-            accel = clamp_norm(dv / max(self.dt, 1e-6), self.p_a_max)
-            p.vel = clamp_norm(p.vel + accel * self.dt, self.p_v_max)
+            to_T = unit(self.T.pos - p.pos)
+            p.vel = clamp_norm(p.vel + to_T * self.p_a_max * self.dt, self.p_v_max)
             p.pos = p.pos + p.vel * self.dt
 
         if self.T.alive:

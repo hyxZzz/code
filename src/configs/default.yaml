@@ -60,7 +60,7 @@ control:
   attack_lead_time: 3.0
   attack_bias: 0.7
 
-  # 行为残差放大与 PN 导引增益（用于教师残差）
+  # 行为残差放大与PN导引增益
   base_alpha: 0.6
   residual_gain: 1.0
   pn_nav_gain: 3.0
