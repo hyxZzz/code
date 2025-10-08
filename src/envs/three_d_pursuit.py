@@ -101,6 +101,15 @@ class ThreeDPursuitEnv:
         self.pending_manager_action: Optional[np.ndarray] = None
         self.last_manager_action = np.full(self.nD, self.manager_null_action, dtype=np.int32)
 
+        mgr_reward_cfg = cfg.get("manager_reward", {})
+        self.manager_cost_bonus_scale = float(mgr_reward_cfg.get("cost_bonus_scale", 0.0))
+        self.manager_coverage_bonus_scale = float(mgr_reward_cfg.get("coverage_bonus_scale", 0.0))
+        self.manager_threat_bonus_scale = float(mgr_reward_cfg.get("threat_bonus_scale", 0.0))
+        self.manager_switch_penalty_scale = float(mgr_reward_cfg.get("switch_penalty_scale", 0.0))
+        self.manager_idle_penalty = float(mgr_reward_cfg.get("idle_penalty", 0.0))
+
+        self._last_manager_stats: Optional[dict] = None
+
         # state
         self.rng = np.random.default_rng(seed=0)
         self.reset()
@@ -372,30 +381,101 @@ class ThreeDPursuitEnv:
         return a_full
 
     # ----------------- assignment API -----------------
-    def set_assignments_rule(self):
-        """Stage one: rule-based assignment with lockout and switch penalty."""
-        high = self._get_obs_high()
-        costs, mask = high["costs"], high["mask"]
-        new_assign = assign_targets(
+    def _rule_assignment_from(self, costs: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        base = assign_targets(
             costs=costs,
             mask=mask,
             prev_assign=self.prev_assign,
             switch_penalty=self.switch_penalty,
             lock_steps=self.assign_lock_steps,
-            algo=self.matcher_algo
+            algo=self.matcher_algo,
         )
+        final = base.copy()
         for i, d in enumerate(self.D):
             if not d.alive:
-                new_assign[i] = -1
+                final[i] = -1
+                continue
+            j_prev = self.prev_assign[i]
+            if 0 <= j_prev < self.nP and mask[i, j_prev] > 0.5 and self.P[j_prev].alive:
+                final[i] = j_prev
+        return final
+
+    def _assignment_cost_stats(self, assign: np.ndarray, costs: np.ndarray) -> tuple[float, int]:
+        total = 0.0
+        count = 0
+        for i, j in enumerate(assign):
+            if 0 <= j < self.nP and self.P[j].alive and np.isfinite(costs[i, j]):
+                total += float(costs[i, j])
+                count += 1
+        return total, count
+
+    def _threat_coverage_score(self, assign: np.ndarray) -> float:
+        score = 0.0
+        for j, p in enumerate(self.P):
+            if not p.alive:
+                continue
+            threat = within_radius(p.pos, self.T.pos, self.t_threat_radius)
+            if not threat:
+                continue
+            covered = any(assign[i] == j for i, d in enumerate(self.D) if d.alive)
+            score += 1.0 if covered else -1.0
+        return score
+
+    def _manager_assignment_reward(self, stats: Optional[dict], prev_assign: np.ndarray) -> float:
+        if not stats:
+            return 0.0
+
+        reward = 0.0
+        cost_delta = stats["baseline_cost"] - stats["new_cost"]
+        if self.manager_cost_bonus_scale != 0.0:
+            reward += self.manager_cost_bonus_scale * cost_delta
+
+        coverage_delta = stats["new_count"] - stats["baseline_count"]
+        if self.manager_coverage_bonus_scale != 0.0:
+            reward += self.manager_coverage_bonus_scale * float(coverage_delta)
+
+        if self.manager_threat_bonus_scale != 0.0:
+            reward += self.manager_threat_bonus_scale * float(stats["threat_score"])
+
+        if self.manager_switch_penalty_scale != 0.0:
+            switches = np.count_nonzero(
+                (prev_assign != self.curr_assign)
+                & (prev_assign >= 0)
+                & (self.curr_assign >= 0)
+            )
+            reward -= self.manager_switch_penalty_scale * float(switches)
+
+        if self.manager_idle_penalty != 0.0:
+            idle = np.count_nonzero(self.curr_assign < 0)
+            reward -= self.manager_idle_penalty * float(idle)
+
+        return reward
+
+    def set_assignments_rule(self, costs: Optional[np.ndarray] = None, mask: Optional[np.ndarray] = None):
+        """Stage one: rule-based assignment with lockout and switch penalty."""
+        if costs is None or mask is None:
+            high = self._get_obs_high()
+            costs = high["costs"]
+            mask = high["mask"]
+        new_assign = self._rule_assignment_from(costs, mask)
         self.curr_assign = new_assign.copy()
         self.prev_assign = new_assign.copy()
         self.last_manager_action = np.full(self.nD, self.manager_null_action, dtype=np.int32)
+        self._last_manager_stats = None
 
-    def _apply_learned_assignment(self, action: np.ndarray):
-        high = self._get_obs_high()
-        costs = high["costs"]
-        mask = high["mask"].copy()
+    def _apply_learned_assignment(
+        self,
+        action: np.ndarray,
+        costs: Optional[np.ndarray] = None,
+        mask: Optional[np.ndarray] = None,
+    ) -> dict:
+        if costs is None or mask is None:
+            high = self._get_obs_high()
+            costs = high["costs"]
+            mask = high["mask"]
+        baseline_assign = self._rule_assignment_from(costs, mask)
 
+        work_mask = mask.copy()
         new_assign = np.full(self.nD, -1, dtype=np.int32)
         used = set()
         action = action.astype(np.int32)
@@ -404,14 +484,14 @@ class ThreeDPursuitEnv:
                 continue
             if choice < 0 or choice >= self.nP:
                 continue
-            if mask[i, choice] < 0.5 or not self.P[choice].alive:
+            if work_mask[i, choice] < 0.5 or not self.P[choice].alive:
                 continue
             if choice in used:
                 continue
             new_assign[i] = choice
             used.add(int(choice))
 
-        mask_adjusted = mask.copy()
+        mask_adjusted = work_mask.copy()
         for j in used:
             mask_adjusted[:, j] = 0.0
         for i, choice in enumerate(new_assign):
@@ -442,6 +522,22 @@ class ThreeDPursuitEnv:
         self.prev_assign = new_assign.copy()
         self.last_manager_action = action.copy()
 
+        baseline_cost, baseline_count = self._assignment_cost_stats(baseline_assign, costs)
+        new_cost, new_count = self._assignment_cost_stats(new_assign, costs)
+        threat_score = self._threat_coverage_score(new_assign)
+
+        stats = {
+            "baseline_assign": baseline_assign,
+            "new_assign": new_assign.copy(),
+            "baseline_cost": baseline_cost,
+            "baseline_count": baseline_count,
+            "new_cost": new_cost,
+            "new_count": new_count,
+            "threat_score": threat_score,
+        }
+        self._last_manager_stats = stats
+        return stats
+
     # ----------------- step -----------------
     def step(self, action_residual: np.ndarray) -> Tuple[Dict, float, bool, Dict]:
         """
@@ -456,17 +552,23 @@ class ThreeDPursuitEnv:
         prev_assign = self.curr_assign.copy()
         prev_dists = self._assignment_distances()
 
+        assignment_stats = None
         # update assignments periodically
         if self.t % max(1, self.manager_period) == 0:
+            high = self._get_obs_high()
+            costs, mask = high["costs"], high["mask"]
             if self.manager_mode == "learned":
                 action = self.pending_manager_action
                 self.pending_manager_action = None
                 if action is None:
-                    self.set_assignments_rule()
+                    self.set_assignments_rule(costs, mask)
                 else:
-                    self._apply_learned_assignment(action)
+                    assignment_stats = self._apply_learned_assignment(action, costs, mask)
             else:
-                self.set_assignments_rule()
+                self.set_assignments_rule(costs, mask)
+
+        manager_bonus = self._manager_assignment_reward(assignment_stats, prev_assign)
+        reward += manager_bonus
 
         pn_actions = np.zeros((self.nD, 3), dtype=np.float32)
         pn_valid = np.zeros((self.nD,), dtype=np.float32)
@@ -586,6 +688,7 @@ class ThreeDPursuitEnv:
             ent.pos = np.clip(ent.pos, self.world_bounds[:, 0], self.world_bounds[:, 1])
 
         obs = self._get_obs()
+        stats = self._last_manager_stats or {}
         info = {
             "pn_action": pn_actions,      # (nD, 3) teacher residual capped by available budget
             "pn_valid": pn_valid,         # (nD,)
@@ -593,6 +696,9 @@ class ThreeDPursuitEnv:
             "assign": self.curr_assign.copy(),
             "manager_action": self.last_manager_action.copy(),
             "manager_mode": self.manager_mode,
+            "manager_bonus": float(manager_bonus),
+            "manager_cost_delta": float(stats.get("baseline_cost", 0.0) - stats.get("new_cost", 0.0)),
+            "manager_threat_score": float(stats.get("threat_score", 0.0)),
             "alive_P": np.array([p.alive for p in self.P], dtype=np.int32),
             "alive_D": np.array([d.alive for d in self.D], dtype=np.int32),
             "approach_delta": approach_delta,
