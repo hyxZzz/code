@@ -249,8 +249,8 @@ def main(args):
                 device,
                 controller=controller,
                 controller_deterministic=controller_deterministic,
-                episodes=int(train_cfg_dict.get("eval_episodes", 50)),
-                seed=2024,
+                episodes=int(train_cfg_dict.get("eval_episodes", 100)),
+                seed=123,
             )
             logger.log_scalar("eval/success", float(sr), upd)
             if sr >= best_sr:
@@ -266,10 +266,10 @@ def main(args):
         device,
         controller=controller,
         controller_deterministic=controller_deterministic,
-        episodes=int(train_cfg_dict.get("final_eval_episodes", 100)),
-        seed=4242,
+        episodes=int(train_cfg_dict.get("final_eval_episodes", 300)),
+        seed=2025,
     )
-    print(f"Final manager eval over {int(train_cfg_dict.get('final_eval_episodes', 100))} eps: {final_sr:.3f} | Best: {best_sr:.3f}")
+    print(f"Final manager eval over {int(train_cfg_dict.get('final_eval_episodes', 300))} eps: {final_sr:.3f} | Best: {best_sr:.3f}")
 
 
 if __name__ == "__main__":
