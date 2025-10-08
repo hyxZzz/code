@@ -42,7 +42,8 @@ update).  The `best.pt` checkpoint is later reused when training the manager.
 ## 3. Evaluate controller checkpoints
 
 ```bash
-python -m src.validate --config src/configs/default.yaml --episodes 1000
+python -m src.validate --config src/configs/default.yaml --episodes 1000 -c best
+python -m src.validate --config src/configs/default.yaml --episodes 1000 -c latest
 ```
 
 Running the validator reproduces the success rate over a large number of
