@@ -90,8 +90,11 @@ manager_train:
   epochs: 4
   batch_size: 256
   value_coef: 0.5
-  entropy_coef: 0.01
-  teacher_coef: 0.1            # imitation weight toward rule-based assignments
+  entropy_coef: 0.005
+  teacher_coef: 0.4            # stronger imitation weight toward rule-based assignments
+  teacher_mixing_start: 1.0    # probability of executing rule assignment at update 0
+  teacher_mixing_end: 0.2      # anneal toward partial teacher forcing
+  teacher_mixing_decay: 200    # updates over which to anneal mixing probability
   max_grad_norm: 0.5
   target_kl: 0.1
   eval_every: 20
