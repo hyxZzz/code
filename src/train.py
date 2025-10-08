@@ -75,39 +75,46 @@ def main(args):
     ctrl_cfg = ControllerConfig(obs_dim=obs_dim, device=device)
     policy = ControllerPolicy(ctrl_cfg).to(device)
 
+    train_cfg = cfg["train"]
+
     # PPO 配置
     ppo_cfg = PPOConfig(
-        gamma=cfg["train"].get("gamma", 0.99),
-        gae_lambda=cfg["train"].get("gae_lambda", 0.95),
-        clip_eps=cfg["train"].get("clip_eps", 0.2),
-        lr=cfg["train"].get("lr", 3e-4),
-        epochs=cfg["train"].get("epochs", 4),
-        batch_size=cfg["train"].get("batch_size", 8192),
-        value_coef=cfg["train"].get("value_coef", 0.5),
-        entropy_coef=cfg["train"].get("entropy_coef", 0.01),
-        imitation_coef=cfg["train"].get("imitation_w_start", 1.0),
+        gamma=train_cfg.get("gamma", 0.99),
+        gae_lambda=train_cfg.get("gae_lambda", 0.95),
+        clip_eps=train_cfg.get("clip_eps", 0.2),
+        lr=train_cfg.get("lr", 3e-4),
+        epochs=train_cfg.get("epochs", 4),
+        batch_size=train_cfg.get("batch_size", 8192),
+        value_coef=train_cfg.get("value_coef", 0.5),
+        entropy_coef=train_cfg.get("entropy_coef", 0.01),
+        imitation_coef=train_cfg.get("imitation_w_start", 1.0),
         imitation_eps=cfg["control"].get("imitation_min_budget", 0.1),
-        max_grad_norm=cfg["train"].get("max_grad_norm", 0.5),
+        max_grad_norm=train_cfg.get("max_grad_norm", 0.5),
         device=device,
-        target_kl=cfg["train"].get("target_kl", 0.15),
-        value_clip_eps=cfg["train"].get("value_clip_eps", 0.2),
-        adv_norm_eps=cfg["train"].get("adv_norm_eps", 1e-8),
+        target_kl=train_cfg.get("target_kl", 0.15),
+        value_clip_eps=train_cfg.get("value_clip_eps", 0.2),
+        adv_norm_eps=train_cfg.get("adv_norm_eps", 1e-8),
     )
     optimizer = Adam(policy.parameters(), lr=ppo_cfg.lr)
     base_lr = ppo_cfg.lr
-    lr_anneal = bool(cfg["train"].get("lr_anneal", True))
-    lr_min_factor = float(cfg["train"].get("lr_min_factor", 0.05))
+    lr_anneal = bool(train_cfg.get("lr_anneal", True))
+    lr_min_factor = float(train_cfg.get("lr_min_factor", 0.05))
 
-    total_updates = cfg["train"].get("updates", 2000)
-    horizon = cfg["train"].get("horizon", 256)
+    total_updates = train_cfg.get("updates", 2000)
+    horizon = train_cfg.get("horizon", 256)
 
     # 残差增益（如需热身冻结，可在此处按 upd 动态改）
     residual_gain = float(cfg["control"].get("residual_gain", 1.0))
 
     # imitation 权重调度
-    imitation_w_start = float(cfg["train"].get("imitation_w_start", 1.0))
-    imitation_w_end   = float(cfg["train"].get("imitation_w_end", 0.1))
-    imitation_decay_updates = int(cfg["train"].get("imitation_decay_updates", total_updates))
+    imitation_w_start = float(train_cfg.get("imitation_w_start", 1.0))
+    imitation_w_end   = float(train_cfg.get("imitation_w_end", 0.1))
+    imitation_decay_updates = int(train_cfg.get("imitation_decay_updates", total_updates))
+
+    # entropy 系数调度，缓解训练后期熵过高导致的成功率回落
+    entropy_start = float(train_cfg.get("entropy_coef_start", ppo_cfg.entropy_coef))
+    entropy_end = float(train_cfg.get("entropy_coef_end", entropy_start))
+    entropy_decay_updates = int(train_cfg.get("entropy_decay_updates", total_updates))
 
     best_sr = 0.0
 
@@ -115,6 +122,13 @@ def main(args):
         # 线性衰减 imitation 权重
         alpha = min(1.0, upd / max(1, imitation_decay_updates))
         ppo_cfg.imitation_coef = float(imitation_w_start + (imitation_w_end - imitation_w_start) * alpha)
+
+        if entropy_decay_updates > 0:
+            frac = min(1.0, upd / float(max(1, entropy_decay_updates)))
+        else:
+            frac = 1.0
+        current_entropy = entropy_start + (entropy_end - entropy_start) * frac
+        ppo_cfg.entropy_coef = max(0.0, float(current_entropy))
 
         buf = RolloutBuffer()
         obs = env.reset(seed=cfg.get("seed", 0) + upd)
@@ -171,6 +185,7 @@ def main(args):
         logger.log_scalar("debug/approx_kl_last", stats["approx_kl_last"], upd)
         logger.log_scalar("debug/kl_stop", 1.0 if stats["kl_stop"] else 0.0, upd)
         logger.log_scalar("train/lr", float(current_lr), upd)
+        logger.log_scalar("train/entropy_coef", float(ppo_cfg.entropy_coef), upd)
 
         # 定期完整评测，并据此刷新 best
         EVAL_EVERY = 20

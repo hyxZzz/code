@@ -98,6 +98,9 @@ manager_train:
   batch_size: 256
   value_coef: 0.5
   entropy_coef: 0.005
+  entropy_coef_start: 0.006
+  entropy_coef_end: 0.001
+  entropy_decay_updates: 240
   teacher_coef: 0.4            # stronger imitation weight toward rule-based assignments
   teacher_mixing_start: 1.0    # probability of executing rule assignment at update 0
   teacher_mixing_end: 0.2      # anneal toward partial teacher forcing
@@ -122,6 +125,9 @@ train:
   batch_size: 1024
   value_coef: 0.5
   entropy_coef: 0.01
+  entropy_coef_start: 0.012
+  entropy_coef_end: 0.001
+  entropy_decay_updates: 320
 
   # 残差模仿权重线性衰减
   imitation_w_start: 1.0
