@@ -107,6 +107,7 @@ class ThreeDPursuitEnv:
         self.manager_threat_bonus_scale = float(mgr_reward_cfg.get("threat_bonus_scale", 0.0))
         self.manager_switch_penalty_scale = float(mgr_reward_cfg.get("switch_penalty_scale", 0.0))
         self.manager_idle_penalty = float(mgr_reward_cfg.get("idle_penalty", 0.0))
+        self.manager_guard_margin = float(mgr_reward_cfg.get("guard_margin", 0.0))
 
         self._last_manager_stats: Optional[dict] = None
 
@@ -425,6 +426,9 @@ class ThreeDPursuitEnv:
         if not stats:
             return 0.0
 
+        if not stats.get("accepted", True):
+            return float(stats.get("reward_proxy", 0.0))
+
         reward = 0.0
         cost_delta = stats["baseline_cost"] - stats["new_cost"]
         if self.manager_cost_bonus_scale != 0.0:
@@ -518,13 +522,42 @@ class ThreeDPursuitEnv:
             if not d.alive:
                 new_assign[i] = -1
 
-        self.curr_assign = new_assign.copy()
-        self.prev_assign = new_assign.copy()
-        self.last_manager_action = action.copy()
-
         baseline_cost, baseline_count = self._assignment_cost_stats(baseline_assign, costs)
         new_cost, new_count = self._assignment_cost_stats(new_assign, costs)
         threat_score = self._threat_coverage_score(new_assign)
+
+        switches = np.count_nonzero(
+            (baseline_assign != new_assign)
+            & (baseline_assign >= 0)
+            & (new_assign >= 0)
+        )
+        idle = np.count_nonzero(new_assign < 0)
+
+        reward_proxy = 0.0
+        if self.manager_cost_bonus_scale != 0.0:
+            reward_proxy += self.manager_cost_bonus_scale * (baseline_cost - new_cost)
+        if self.manager_coverage_bonus_scale != 0.0:
+            reward_proxy += self.manager_coverage_bonus_scale * float(new_count - baseline_count)
+        if self.manager_threat_bonus_scale != 0.0:
+            reward_proxy += self.manager_threat_bonus_scale * float(threat_score)
+        if self.manager_switch_penalty_scale != 0.0:
+            reward_proxy -= self.manager_switch_penalty_scale * float(switches)
+        if self.manager_idle_penalty != 0.0:
+            reward_proxy -= self.manager_idle_penalty * float(idle)
+
+        accepted = reward_proxy >= -self.manager_guard_margin
+        if accepted:
+            self.curr_assign = new_assign.copy()
+            self.prev_assign = new_assign.copy()
+            self.last_manager_action = action.copy()
+        else:
+            self.curr_assign = baseline_assign.copy()
+            self.prev_assign = baseline_assign.copy()
+            baseline_action = np.full(self.nD, self.manager_null_action, dtype=np.int32)
+            for i, val in enumerate(baseline_assign):
+                if 0 <= val < self.nP and self.P[val].alive and mask[i, val] > 0.5:
+                    baseline_action[i] = int(val)
+            self.last_manager_action = baseline_action
 
         stats = {
             "baseline_assign": baseline_assign,
@@ -534,6 +567,11 @@ class ThreeDPursuitEnv:
             "new_cost": new_cost,
             "new_count": new_count,
             "threat_score": threat_score,
+            "switches": switches,
+            "idle": idle,
+            "accepted": bool(accepted),
+            "reward_proxy": float(reward_proxy),
+            "proposed_action": action.copy(),
         }
         self._last_manager_stats = stats
         return stats
@@ -699,6 +737,11 @@ class ThreeDPursuitEnv:
             "manager_bonus": float(manager_bonus),
             "manager_cost_delta": float(stats.get("baseline_cost", 0.0) - stats.get("new_cost", 0.0)),
             "manager_threat_score": float(stats.get("threat_score", 0.0)),
+            "manager_switches": int(stats.get("switches", 0)),
+            "manager_idle": int(stats.get("idle", 0)),
+            "manager_reward_proxy": float(stats.get("reward_proxy", 0.0)),
+            "manager_assignment_accepted": bool(stats.get("accepted", True)),
+            "manager_proposed_action": stats.get("proposed_action"),
             "alive_P": np.array([p.alive for p in self.P], dtype=np.int32),
             "alive_D": np.array([d.alive for d in self.D], dtype=np.int32),
             "approach_delta": approach_delta,
