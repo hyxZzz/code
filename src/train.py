@@ -117,6 +117,7 @@ def main(args):
     entropy_decay_updates = int(train_cfg.get("entropy_decay_updates", total_updates))
 
     best_sr = 0.0
+    best_ckpt_path = os.path.join("ckpts", "best.pt")
 
     for upd in range(1, total_updates + 1):
         # 线性衰减 imitation 权重
@@ -186,6 +187,7 @@ def main(args):
         logger.log_scalar("debug/kl_stop", 1.0 if stats["kl_stop"] else 0.0, upd)
         logger.log_scalar("train/lr", float(current_lr), upd)
         logger.log_scalar("train/entropy_coef", float(ppo_cfg.entropy_coef), upd)
+        logger.log_scalar("train/imitation_coef", float(ppo_cfg.imitation_coef), upd)
 
         # 定期完整评测，并据此刷新 best
         EVAL_EVERY = 20
@@ -194,12 +196,16 @@ def main(args):
             logger.log_scalar("eval/success", sr_eval, upd)
             if sr_eval >= best_sr:
                 best_sr = sr_eval
-                torch.save(policy.state_dict(), os.path.join("ckpts", "best.pt"))
+                torch.save(policy.state_dict(), best_ckpt_path)
 
         logger.flush()
         torch.save(policy.state_dict(), os.path.join("ckpts", "latest.pt"))
 
     # 收官大评测（避免只看历史最好值）
+    if os.path.exists(best_ckpt_path):
+        state_dict = torch.load(best_ckpt_path, map_location=device)
+        policy.load_state_dict(state_dict)
+        torch.save(policy.state_dict(), os.path.join("ckpts", "latest.pt"))
     final_sr = quick_eval(lambda: make_env(cfg), policy, device, episodes=300, seed=2025)
     print(f"Final eval over 300 eps: {final_sr:.3f} | Best during training: {best_sr:.3f}")
 

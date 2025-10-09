@@ -71,7 +71,7 @@ control:
 
   # 行为残差放大与PN导引增益
   base_alpha: 0.6
-  residual_gain: 1.0
+  residual_gain: 0.8
   pn_nav_gain: 3.0
 
   # 管理器周期（更快刷新分配）
@@ -136,10 +136,10 @@ train:
   value_coef: 0.5
   entropy_coef: 0.01
   entropy_coef_start: 0.012
-  entropy_coef_end: 0.001
+  entropy_coef_end: 0.0005
   entropy_decay_updates: 320
 
   # 残差模仿权重线性衰减
   imitation_w_start: 1.0
-  imitation_w_end: 0.2
-  imitation_decay_updates: 400
+  imitation_w_end: 0.5
+  imitation_decay_updates: 800
