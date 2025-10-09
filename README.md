@@ -127,4 +127,3 @@ per-step manager diagnostics such as the reward proxy, guard-rail bonus, and
 threat estimates.  Pass `--stochastic-controller` or `--stochastic-manager` to
 sample from the policies instead of using greedy actions, or `--no-assign-lines`
 to focus on raw trajectories.
-
