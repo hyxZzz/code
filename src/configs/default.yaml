@@ -86,6 +86,7 @@ manager_reward:
   threat_bonus_scale: 0.3      # 优先盯防威胁目标
   switch_penalty_scale: 0.05   # 避免频繁换防
   idle_penalty: 0.03           # 减少防守空转
+  guard_margin: 0.05           # 学习策略得分低于该阈值时回退到规则分配
 
 manager_train:
   updates: 300
