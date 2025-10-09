@@ -7,6 +7,26 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 from .dynamics import clamp_norm, within_radius, unit
+
+
+def rotate_about_axis(vec: np.ndarray, axis: np.ndarray, angle: float) -> np.ndarray:
+    """Rotate a vector around an axis by a given angle (right-hand rule)."""
+
+    axis = unit(axis.astype(np.float32))
+    if np.linalg.norm(axis) < 1e-6:
+        return vec.astype(np.float32)
+
+    vec = vec.astype(np.float32)
+    cos_a = float(np.cos(angle))
+    sin_a = float(np.sin(angle))
+    cross = np.cross(axis, vec)
+    dot = float(np.dot(axis, vec))
+    rotated = (
+        vec * cos_a
+        + cross * sin_a
+        + axis * dot * (1.0 - cos_a)
+    )
+    return rotated.astype(np.float32)
 from ..matcher import assign_targets
 
 
@@ -32,10 +52,45 @@ class ThreeDPursuitEnv:
             dtype=np.float32
         )
 
-        # constant velocity for the target
-        self.T_vel = np.array(e.get("t_velocity", [8.0, 0.0, 0.0]), dtype=np.float32)
-        self.T_speed = float(np.linalg.norm(self.T_vel))
-        self.T_vel_unit = (self.T_vel / (self.T_speed + 1e-9)).astype(np.float32)
+        # target initial velocity and manoeuvre configuration
+        self.T_init_vel = np.array(e.get("t_velocity", [8.0, 0.0, 0.0]), dtype=np.float32)
+        self.T_speed = float(np.linalg.norm(self.T_init_vel))
+        if self.T_speed < 1e-6:
+            raise ValueError("Target speed must be positive to perform manoeuvres.")
+        self.T_init_vel_unit = (self.T_init_vel / (self.T_speed + 1e-9)).astype(np.float32)
+
+        turn_cfg = e.get("t_turn", {})
+        self.t_turn_enabled = bool(turn_cfg.get("enabled", True))
+        self.t_turn_start_time = float(turn_cfg.get("delay", 0.0))
+        self.t_turn_radius = float(turn_cfg.get("radius", 120.0))
+        self.t_turn_direction = 1.0
+        if str(turn_cfg.get("direction", "left")).lower() == "right":
+            self.t_turn_direction = -1.0
+
+        axis = np.array(turn_cfg.get("axis", [0.0, 0.0, 1.0]), dtype=np.float32)
+        if np.linalg.norm(axis) < 1e-6:
+            axis = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        self.t_turn_axis = unit(axis)
+
+        angle_cfg = float(turn_cfg.get("angle_deg", 180.0))
+        self.t_turn_total_angle = abs(float(np.deg2rad(angle_cfg)))
+        if self.t_turn_total_angle < 1e-6:
+            self.t_turn_enabled = False
+
+        if self.t_turn_radius <= 1e-6:
+            self.t_turn_enabled = False
+
+        if not self.t_turn_enabled:
+            self.t_turn_radius = 0.0
+            self.t_turn_omega = 0.0
+            self.t_turn_duration = 0.0
+        else:
+            self.t_turn_omega = self.T_speed / self.t_turn_radius
+            if self.t_turn_omega <= 1e-6:
+                self.t_turn_enabled = False
+                self.t_turn_duration = 0.0
+            else:
+                self.t_turn_duration = self.t_turn_total_angle / self.t_turn_omega
 
         # kill radii
         self.t_attack_radius = float(e.get("t_attack_radius", 10.0))
@@ -138,7 +193,7 @@ class ThreeDPursuitEnv:
             low[i, :3] = r
             low[i, 3:6] = v_rel
             low[i, 6:9] = d.vel
-            low[i, 9:12] = self.T_vel
+            low[i, 9:12] = self.T.vel.astype(np.float32)
             low[i, 12] = has
         return low
 
@@ -259,9 +314,10 @@ class ThreeDPursuitEnv:
         t_x = (x_lo + x_hi) * self.spawn_t_x_frac
         self.T = Entity(
             pos=np.array([t_x, 0.0, 0.0], dtype=np.float32),
-            vel=self.T_vel.copy(),
+            vel=self.T_init_vel.copy(),
             alive=True
         )
+        self._reset_target_motion_state()
 
         # attackers: sampled distance based on expected closing time with lateral spread
         self.P = []
@@ -271,7 +327,7 @@ class ThreeDPursuitEnv:
                 speed = self.rng.uniform(0.6 * self.p_v_max, 1.0 * self.p_v_max)
                 closing_speed = speed + self.T_speed
                 axial = closing_speed * self.front_hit_time
-                anchor = self.T.pos + self.T_vel_unit * axial
+                anchor = self.T.pos + self.T_init_vel_unit * axial
                 dy = self.rng.uniform(-self.lateral_spread_y, self.lateral_spread_y)
                 dz = self.rng.uniform(-self.lateral_spread_z, self.lateral_spread_z)
                 cand = anchor + np.array([0.0, dy, dz], dtype=np.float32)
@@ -295,7 +351,7 @@ class ThreeDPursuitEnv:
 
             if not placed:
                 fallback_axial = (self.p_v_max + self.T_speed) * self.front_hit_time * 1.25
-                cand = self.T.pos + self.T_vel_unit * fallback_axial
+                cand = self.T.pos + self.T_init_vel_unit * fallback_axial
                 cand = np.clip(cand, self.world_bounds[:, 0], self.world_bounds[:, 1])
                 dir_to_T = unit(self.T.pos - cand)
                 p_vel = dir_to_T * self.p_v_max
@@ -314,7 +370,7 @@ class ThreeDPursuitEnv:
                 np.sin(ang_z) * self.d_guard_radius * 0.2
             ], dtype=np.float32)
             d_pos = np.clip(self.T.pos + offset, self.world_bounds[:, 0], self.world_bounds[:, 1])
-            d_vel = np.array([self.T_vel[0], 0.0, 0.0], dtype=np.float32)  # initial speed along +x
+            d_vel = self.T_init_vel.copy()
             self.D.append(Entity(pos=d_pos, vel=d_vel, alive=True))
 
         self.guard_offsets = np.array([d.pos - self.T.pos for d in self.D], dtype=np.float32)
@@ -327,6 +383,77 @@ class ThreeDPursuitEnv:
         self.last_manager_action = np.full(self.nD, self.manager_null_action, dtype=np.int32)
         self.set_assignments_rule()
         return self._get_obs()
+
+    def _reset_target_motion_state(self):
+        forward = self.T_init_vel_unit.copy()
+        if np.linalg.norm(self.T.vel) > 1e-6:
+            forward = unit(self.T.vel)
+        self.t_turn_time = 0.0
+        self.t_turn_started = False
+        self.t_turn_completed = not self.t_turn_enabled
+        self.t_turn_center = np.zeros(3, dtype=np.float32)
+        self.t_turn_start_rel = np.zeros(3, dtype=np.float32)
+        self.t_turn_forward = forward.astype(np.float32)
+        self.t_turn_exit_dir = forward.astype(np.float32)
+        self.t_turn_left = np.zeros(3, dtype=np.float32)
+
+    def _start_target_turn(self):
+        self.t_turn_started = True
+        self.t_turn_time = 0.0
+
+        forward = unit(self.T.vel) if np.linalg.norm(self.T.vel) > 1e-6 else self.t_turn_forward
+        axis = self.t_turn_axis
+        left = np.cross(axis, forward)
+        if np.linalg.norm(left) < 1e-6:
+            fallback_axis = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+            if np.linalg.norm(np.cross(fallback_axis, forward)) < 1e-6:
+                fallback_axis = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+            left = np.cross(fallback_axis, forward)
+        if np.linalg.norm(left) < 1e-6:
+            left = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        left = unit(left)
+
+        self.t_turn_forward = forward.astype(np.float32)
+        self.t_turn_left = left.astype(np.float32)
+        self.t_turn_center = (self.T.pos + self.t_turn_direction * left * self.t_turn_radius).astype(np.float32)
+        self.t_turn_start_rel = (self.T.pos - self.t_turn_center).astype(np.float32)
+        exit_dir = rotate_about_axis(self.t_turn_forward, axis, self.t_turn_direction * self.t_turn_total_angle)
+        self.t_turn_exit_dir = unit(exit_dir)
+
+    def _advance_target_turn(self):
+        self.t_turn_time = min(self.t_turn_time + self.dt, self.t_turn_duration)
+        angle = self.t_turn_direction * self.t_turn_omega * self.t_turn_time
+        rel = rotate_about_axis(self.t_turn_start_rel, self.t_turn_axis, angle)
+        self.T.pos = (self.t_turn_center + rel).astype(np.float32)
+
+        tangential = self.t_turn_direction * np.cross(self.t_turn_axis, rel)
+        if np.linalg.norm(tangential) < 1e-6:
+            tangential = self.t_turn_exit_dir
+        self.T.vel = unit(tangential) * self.T_speed
+
+        if self.t_turn_time >= self.t_turn_duration - 1e-6:
+            self.t_turn_completed = True
+            final_rel = rotate_about_axis(
+                self.t_turn_start_rel,
+                self.t_turn_axis,
+                self.t_turn_direction * self.t_turn_total_angle,
+            )
+            self.T.pos = (self.t_turn_center + final_rel).astype(np.float32)
+            self.T.vel = unit(self.t_turn_exit_dir) * self.T_speed
+
+    def _update_target_motion(self):
+        if not self.t_turn_enabled or self.t_turn_completed:
+            self.T.pos = self.T.pos + self.T.vel * self.dt
+            return
+
+        current_time = self.t * self.dt
+        if not self.t_turn_started and current_time >= self.t_turn_start_time:
+            self._start_target_turn()
+
+        if self.t_turn_started and not self.t_turn_completed:
+            self._advance_target_turn()
+        else:
+            self.T.pos = self.T.pos + self.T.vel * self.dt
 
     def _assignment_distances(self) -> np.ndarray:
         dists = np.zeros(self.nD, dtype=np.float32)
@@ -676,7 +803,7 @@ class ThreeDPursuitEnv:
             p.pos = p.pos + p.vel * self.dt
 
         if self.T.alive:
-            self.T.pos = self.T.pos + self.T_vel * self.dt
+            self._update_target_motion()
 
         # contact checks
         # attacker reaches the target -> failure

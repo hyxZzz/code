@@ -17,6 +17,15 @@ env:
   # 目标初速度（T）
   t_velocity: [10.0, 0.0, 0.0]
 
+  # 目标机动：放出 D 后执行环形掉头
+  t_turn:
+    enabled: true
+    delay: 0.0           # s，放出 D 后立即机动
+    radius: 200.0        # m，环形掉头半径
+    direction: left      # left | right，默认向左掉头
+    angle_deg: 180.0     # 掉头角度（默认 180°）
+    axis: [0.0, 0.0, 1.0]
+
   # 攻击者(P)/防守者(D)的速度/加速度上限
   p_speed_max: 24.0
   p_accel_max: 6.0
