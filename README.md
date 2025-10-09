@@ -101,11 +101,30 @@ loss) and reports whether checkpoints are present.
 
 ## 7. Visualise trajectories
 
+### Controller-only rollouts
+
 ```bash
 python -m src.viz_gif --config src/configs/default.yaml \
   --weights ckpts/best.pt --out runs/viz_best.gif --frames 600 --fps 15
 ```
 
-The renderer generates a GIF containing the target, defenders, attackers, and
-assignment lines, allowing qualitative inspection of the learned behaviour.
+This helper renders the environment with the residual controller acting under
+the default (rule-based) manager.  It is useful for quickly inspecting the
+controller in isolation before introducing the learned assignment layer.
+
+### Full hierarchical stack
+
+```bash
+python -m src.viz_hierarchical --config src/configs/default.yaml \
+  --controller-ckpt ckpts/best.pt \
+  --manager-ckpt ckpts/manager_best.pt \
+  --out runs/viz_hier.gif --frames 600 --fps 15
+```
+
+The hierarchical visualiser overlays both accepted and proposed defender
+assignments (solid purple and dashed orange, respectively) together with
+per-step manager diagnostics such as the reward proxy, guard-rail bonus, and
+threat estimates.  Pass `--stochastic-controller` or `--stochastic-manager` to
+sample from the policies instead of using greedy actions, or `--no-assign-lines`
+to focus on raw trajectories.
 
